@@ -1,6 +1,21 @@
 import { ai } from '../config/gemini.js';
 import * as dbService from './db.service.js';
 import * as whatsappService from './whatsapp.service.js';
+import OpenAI from 'openai';
+import { supabase } from '../config/supabase.js';
+
+// Initialize OpenAI client lazily to prevent crashes at startup when OPENAI_API_KEY is not defined.
+let openai = null;
+function getOpenAIClient() {
+  if (!openai) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error('Missing OPENAI_API_KEY environment variable.');
+    }
+    openai = new OpenAI({ apiKey });
+  }
+  return openai;
+}
 
 // Static FAQ Cache representing Zero-Token Intercept for common customer inquiries.
 // By routing these matches locally, we spend 0 API tokens and guarantee instantaneous responses.
@@ -32,7 +47,7 @@ function normalizeFaqInput(input) {
  * @param {string} name - Customer profile name.
  * @param {string} text - Message text payload.
  */
-export async function processAIResponse(phone, name, text) {
+export async function processAIResponse(phone, name, text, tenantId = null) {
   // --- Token Optimization: Enforce a strict length limit on incoming user message ---
   const MAX_CHAR_LIMIT = 500;
   let processedText = text;
@@ -50,39 +65,55 @@ export async function processAIResponse(phone, name, text) {
   if (cachedAnswer) {
     console.log(`[FAQ Cache] ✅ Cache HIT for "${normalizedInput}" — skipping Gemini API call entirely.`);
 
-    // Persist the transaction in the database for consistency and audits
-    const conversationId = await dbService.resolveConversation(phone, name);
-    await dbService.insertMessage(conversationId, 'user', processedText);
-    await dbService.insertMessage(conversationId, 'model', cachedAnswer);
-
-    await whatsappService.sendWhatsAppMessage(phone, cachedAnswer);
-    return; // Stop execution to save Gemini API costs
+    // Return the mocked JSON string matching the unified schema.
+    return JSON.stringify({
+      reply_message: cachedAnswer,
+      lead_extraction: {
+        has_booking_intent: false,
+        customer_name: null,
+        requested_service: null,
+        urgency: null
+      }
+    });
   }
 
   // ── 2. Conversation Resolution & System Prompt Retrieval ──────────────────
-  const conversationId = await dbService.resolveConversation(phone, name);
+  const conversationId = await dbService.resolveConversation(phone, name, tenantId);
 
   // Retrieve the tenant ID linked to this active chat
   const metadata = await dbService.getConversationMetadata(conversationId);
-  const tenantId = metadata.tenant_id;
-  console.log(`[Supabase] Resolved tenant_id: "${tenantId}" for conversation: "${conversationId}"`);
+  const resolvedTenantId = metadata.tenant_id || tenantId;
+  console.log(`[Supabase] Resolved tenant_id: "${resolvedTenantId}" for conversation: "${conversationId}"`);
 
   // Retrieve custom tenant prompt instructions
-  const baseInstruction = await dbService.getTenantInstruction(tenantId);
+  const baseInstruction = await dbService.getTenantInstruction(resolvedTenantId);
   console.log(`[Supabase] Fetched base system instruction of length: ${baseInstruction.length}`);
 
   // Retrieve all FAQs associated with this tenant
-  const faqRows = await dbService.getKnowledgeBaseFaqs(tenantId);
-  console.log(`[Supabase] Fetched ${(faqRows || []).length} FAQ entries for tenant_id: ${tenantId}`);
+  const faqRows = await dbService.getKnowledgeBaseFaqs(resolvedTenantId);
+  console.log(`[Supabase] Fetched ${(faqRows || []).length} FAQ entries for tenant_id: ${resolvedTenantId}`);
 
   // --- Prompt Efficiency: Construct clean instruction while stripping redundant spaces/newlines ---
-  let systemInstruction = baseInstruction;
+  let systemInstruction = `You are Saarthi, an elite AI assistant. You must respond to the user based on the provided Knowledge Base and instructions. 
+CRITICAL: You must ALWAYS return your response in the following strict JSON format:
+{
+  "reply_message": "The actual text response you want to send to the WhatsApp user.",
+  "lead_extraction": {
+    "has_booking_intent": boolean (true ONLY if they are trying to book, buy, or get a quote),
+    "customer_name": "Extracted name or null",
+    "requested_service": "Extracted service or null",
+    "urgency": "high, medium, low, or null"
+  }
+}`;
+
+  if (baseInstruction) {
+    systemInstruction += `\n\nAdditional Instructions:\n${baseInstruction}`;
+  }
+
   if (faqRows && faqRows.length > 0) {
     const faqText = faqRows.map(row => `Q: ${row.question}\nA: ${row.answer}`).join('\n\n');
     systemInstruction += `\n\nUse the following knowledge base FAQs to answer customer questions when relevant:\n${faqText}`;
   }
-
-  systemInstruction += "\n\nCRITICAL DIRECTIVE: If the user indicates they want to book, schedule, or request a service, YOU MUST NOT REPLY WITH TEXT. You MUST strictly invoke the 'extract_lead' function with their details.";
 
   // Strip excessive spaces, tabs, and double-newlines to make prompt delivery highly token-efficient
   systemInstruction = systemInstruction
@@ -90,10 +121,7 @@ export async function processAIResponse(phone, name, text) {
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 
-  // ── 3. Save incoming user message to DB before hitting Gemini ────────────
-  await dbService.insertMessage(conversationId, 'user', processedText);
-
-  // ── 4. Build context window from the last 4 messages in the DB (Context Pruning) ──
+  // ── 3. Build context window from the last 4 messages in the DB (Context Pruning) ──
   // By requesting a max of the last 4 messages, we prevent long chats from bloating prompt length.
   const recentMessages = await dbService.getRecentMessages(conversationId, 4);
 
@@ -120,35 +148,7 @@ export async function processAIResponse(phone, name, text) {
     history.shift();
   }
 
-  // ── 5. Gemini Tool Definition ─────────────────────────────────────────────
-  // Core definition for Lead Extraction, preserved exactly from working code.
-  const tools = [
-    {
-      functionDeclarations: [
-        {
-          name: 'extract_lead',
-          description: 'CRITICAL: Call this function IMMEDIATELY when a customer explicitly asks to book a service, requests a schedule, or indicates an emergency need for a specific service.',
-          parameters: {
-            type: 'OBJECT',
-            properties: {
-              service_requested: {
-                type: 'STRING',
-                description: 'The specific detailing service or package the customer is requesting (e.g. Ceramic Coating, Exterior Wash, etc.).'
-              },
-              urgency: {
-                type: 'STRING',
-                enum: ['low', 'medium', 'high'],
-                description: 'The urgency level of the request.'
-              }
-            },
-            required: ['service_requested', 'urgency']
-          }
-        }
-      ]
-    }
-  ];
-
-  // ── 6. Gemini API Call with Hard Token Limits & Robust Retries ───────────
+  // ── 4. Gemini API Call with Hard Token Limits & Robust Retries ───────────
   const maxRetries = 3;
   let responseData = null;
   let lastError = null;
@@ -162,13 +162,40 @@ export async function processAIResponse(phone, name, text) {
         contents: history,
         config: {
           systemInstruction: systemInstruction,
-          tools: tools,
-          toolConfig: {
-            functionCallingConfig: {
-              mode: "AUTO"
-            }
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              reply_message: {
+                type: "STRING",
+                description: "The actual text response you want to send to the WhatsApp user."
+              },
+              lead_extraction: {
+                type: "OBJECT",
+                properties: {
+                  has_booking_intent: {
+                    type: "BOOLEAN",
+                    description: "true ONLY if they are trying to book, buy, or get a quote"
+                  },
+                  customer_name: {
+                    type: "STRING",
+                    description: "Extracted name or null"
+                  },
+                  requested_service: {
+                    type: "STRING",
+                    description: "Extracted service or null"
+                  },
+                  urgency: {
+                    type: "STRING",
+                    description: "high, medium, low, or null"
+                  }
+                },
+                required: ["has_booking_intent", "customer_name", "requested_service", "urgency"]
+              }
+            },
+            required: ["reply_message", "lead_extraction"]
           },
-          maxOutputTokens: 250,
+          maxOutputTokens: 500,
           temperature: 0.3
         }
       });
@@ -196,69 +223,17 @@ export async function processAIResponse(phone, name, text) {
   }
 
   if (responseData) {
-    const parts = responseData.candidates?.[0]?.content?.parts || [];
-    const functionCallPart = parts.find(p => p.functionCall);
-    const functionCall = functionCallPart ? functionCallPart.functionCall : null;
-
-    if (functionCall && functionCall.name === 'extract_lead') {
-      const { service_requested, urgency } = functionCall.args;
-      console.log(`[Gemini AI] 🎯 Tool extract_lead invoked! Service: "${service_requested}", Urgency: "${urgency}"`);
-
-      // Log the lead record securely in Supabase RLS bypass
-      await dbService.insertLead({
-        tenant_id: tenantId,
-        conversation_id: conversationId,
-        customer_name: name,
-        customer_phone: phone,
-        service_requested: service_requested,
-        urgency: urgency
-      });
-
-      console.log(`[Supabase] ✅ Lead successfully logged in the database for ${name} (${phone})`);
-
-      // Inform user of successful capture
-      const confirmationMsg = `I've logged your request for ${service_requested}! Our team will contact you shortly.`;
-      console.log(`[WhatsApp] Sending lead logged confirmation to ${phone}: "${confirmationMsg}"`);
-      await whatsappService.sendWhatsAppMessage(phone, confirmationMsg);
-
-      // Audit model response in history
-      await dbService.insertMessage(conversationId, 'model', confirmationMsg);
-
-    } else {
-      // Normal Chat Flow
-      let aiReplyText = responseData.text || '';
-      if (!aiReplyText || aiReplyText.trim() === '') {
-        aiReplyText = "I'm sorry, I didn't quite catch that. What kind of service are you looking to book?";
-      }
-      console.log(`[Gemini AI] Generated normal reply for ${name}: "${aiReplyText}"`);
-
-      // ── 7. Menu Pruning: lightweight DB logs but full text delivery to users ──
-      const hasMenu = aiReplyText.includes('[SHOW_MENU]');
-      const dbText = hasMenu
-        ? '[I showed the user the services menu]'
-        : aiReplyText;
-
-      await dbService.insertMessage(conversationId, 'model', dbText);
-
-      // Send output replies back to Meta Cloud API
-      if (hasMenu) {
-        const cleanedReply = aiReplyText.replace('[SHOW_MENU]', '').trim();
-        if (cleanedReply) {
-          await whatsappService.sendWhatsAppMessage(phone, cleanedReply);
-        }
-        await whatsappService.sendWhatsAppInteractiveMenu(phone);
-      } else {
-        await whatsappService.sendWhatsAppMessage(phone, aiReplyText);
-      }
+    const responseText = responseData.text || '';
+    if (!responseText || responseText.trim() === '') {
+      throw new Error("Empty response received from Gemini.");
     }
+    return responseText;
   } else {
     console.error(`❌ Error: All attempts failed for ${name}. Last error:`, lastError);
 
     // Rollback the unanswered user message so it does not clutter future context windows
     await dbService.deleteLastCustomerMessage(conversationId, processedText);
-
-    // Inform user of connection failure
-    await whatsappService.sendWhatsAppMessage(phone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
+    throw lastError || new Error(`Failed to generate response for ${name}.`);
   }
 }
 
@@ -289,3 +264,125 @@ CONNECTION TO OTHER FILES:
 - Exposed 'processAIResponse' is triggered asynchronously inside src/controllers/webhook.controller.js.
 =========================================
 */
+
+/**
+ * Generates an outbound AI response using OpenAI and sends it via Meta's WhatsApp Cloud API.
+ * Saves the resulting AI message to the database.
+ * @param {string} conversationId 
+ * @param {string} customerPhone 
+ * @param {string} incomingMessage 
+ */
+export async function generateAndSendAIResponse(conversationId, customerPhone, incomingMessage) {
+  try {
+    console.log(`[OpenAI Chat] Generating AI response for conversation ${conversationId}...`);
+
+    // Step A (Fetch Context): Query Supabase for the active tenant's settings and knowledge base (FAQs)
+    // 1. Resolve tenant_id from conversations table
+    const { data: convData, error: convError } = await supabase
+      .from('conversations')
+      .select('tenant_id')
+      .eq('id', conversationId)
+      .single();
+
+    if (convError || !convData) {
+      throw new Error(`Failed to retrieve conversation metadata: ${convError?.message}`);
+    }
+    const tenantId = convData.tenant_id;
+
+    // 2. Fetch the tenant settings (system prompt/tone)
+    const { data: tenantData, error: tenantError } = await supabase
+      .from('tenants')
+      .select('ai_system_instruction, ai_tone, business_name')
+      .eq('id', tenantId)
+      .single();
+
+    const systemInstruction = tenantData?.ai_system_instruction || '';
+    const aiTone = tenantData?.ai_tone || 'professional';
+    const businessName = tenantData?.business_name || 'this business';
+
+    // 3. Fetch knowledge_base FAQs
+    const { data: faqs, error: faqsError } = await supabase
+      .from('knowledge_base')
+      .select('question, answer')
+      .eq('tenant_id', tenantId);
+
+    // Step B (Prompt Construction): Construct system prompt
+    let systemPrompt = `You are a helpful WhatsApp assistant for ${businessName}. Use the following knowledge base to answer the user. If the answer isn't in the knowledge base, politely say you don't know and offer to connect them to a human.\n`;
+    systemPrompt += `AI Tone: ${aiTone}\n`;
+    if (systemInstruction) {
+      systemPrompt += `System Prompt / Tone Rules:\n${systemInstruction}\n`;
+    }
+
+    if (faqs && faqs.length > 0) {
+      const faqText = faqs.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n\n');
+      systemPrompt += `\nKnowledge Base FAQs:\n${faqText}\n`;
+    }
+
+    console.log(`[OpenAI Chat] Constructing completions API call with prompt length: ${systemPrompt.length}`);
+
+    // Step C (Call AI): Call OpenAI Chat Completions API
+    const completion = await getOpenAIClient().chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: incomingMessage }
+      ],
+      max_tokens: 300,
+      temperature: 0.7
+    });
+
+    const aiMessageText = completion.choices[0]?.message?.content || "I'm sorry, I couldn't process your request. Would you like me to connect you to a human?";
+    console.log(`[OpenAI Chat] Generated completion: "${aiMessageText}"`);
+
+    // Step D: Send message via Meta WhatsApp API
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+
+    if (!phoneNumberId || !accessToken) {
+      throw new Error('Missing WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN in environment variables.');
+    }
+
+    const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
+    console.log(`[Meta API] Sending message to ${customerPhone} via Meta Graph API v18.0...`);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: customerPhone,
+        type: "text",
+        text: {
+          body: aiMessageText
+        }
+      })
+    });
+
+    const responseData = await response.json();
+    if (!response.ok) {
+      throw new Error(`Meta Cloud API responded with error: ${JSON.stringify(responseData)}`);
+    }
+    console.log(`[Meta API] Outbound message successfully transmitted to ${customerPhone}`);
+
+    // Step E: Save to Supabase
+    const { error: insertMsgError } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: conversationId,
+        tenant_id: tenantId,
+        sender: 'ai',
+        message_text: aiMessageText
+      });
+
+    if (insertMsgError) {
+      throw new Error(`Failed to save AI response to Supabase: ${insertMsgError.message}`);
+    }
+    console.log(`[Supabase] Outbound AI response logged successfully in messages table`);
+
+  } catch (error) {
+    console.error('❌ Error in generateAndSendAIResponse:', error.message || error);
+  }
+}

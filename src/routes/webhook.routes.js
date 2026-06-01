@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { verifyWebhook, handleWebhookEvent } from '../controllers/webhook.controller.js';
+import { verifyWebhook, handleWebhookEvent, sendMessageFromHuman } from '../controllers/webhook.controller.js';
 
 // Instantiate Express Router instance
 const router = Router();
@@ -11,6 +11,10 @@ router.get('/webhook/whatsapp', verifyWebhook);
 // Route: POST /webhook/whatsapp
 // Triggers the processing of new inbound customer chat notifications.
 router.post('/webhook/whatsapp', handleWebhookEvent);
+
+// Route: POST /api/send-message
+// Triggers manually sent human agent responses.
+router.post('/api/send-message', sendMessageFromHuman);
 
 // Export router instance for application binding
 export default router;

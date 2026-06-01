@@ -1,5 +1,13 @@
 import { env } from '../config/env.js';
 import * as aiService from '../services/ai.service.js';
+import * as whatsappService from '../services/whatsapp.service.js';
+import { createClient } from '@supabase/supabase-js';
+
+// Initialize Supabase admin client using process.env.SUPABASE_URL and process.env.SUPABASE_SERVICE_ROLE_KEY
+const supabase = createClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+);
 
 // In-memory cache to hold processed message IDs.
 const processedMessages = new Set();
@@ -86,6 +94,7 @@ export async function handleWebhookEvent(req, res) {
 
     const customerPhone = message.from;
     const customerName = req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name || 'Unknown';
+    const businessPhoneNumberId = value?.metadata?.phone_number_id;
 
     console.log('\n┌────────────────────────────────────────────────────────┐');
     console.log('│             📬 NEW WHATSAPP MESSAGE RECEIVED            │');
@@ -99,19 +108,317 @@ export async function handleWebhookEvent(req, res) {
     // Meta requires an acknowledgment within 3 seconds, or it will trigger a retry.
     res.status(200).send('EVENT_RECEIVED');
 
-    // Await the AI processing after sending the response to Meta to prevent timeout loops.
-    if (messageText) {
+    // Process database operations and downstream AI processing asynchronously in the background.
+    (async () => {
+      let isAiActive = true;
+      let tenantId = null;
+      let conversationId = null;
       try {
-        await aiService.processAIResponse(customerPhone, customerName, messageText);
-      } catch (err) {
-        console.error('Error in processAIResponse background worker:', err);
+        console.log(`[Supabase] 🔄 Persisting incoming message from ${customerPhone}...`);
+
+        // 1. Resolve tenant_id first to satisfy foreign key constraints.
+        let resolvedTenant = null;
+        if (businessPhoneNumberId) {
+          console.log(`[Supabase] 🔍 Resolving tenant by whatsapp_phone_number_id: ${businessPhoneNumberId}`);
+          const { data, error } = await supabase
+            .from('tenants')
+            .select('id')
+            .eq('whatsapp_phone_number_id', businessPhoneNumberId)
+            .limit(1)
+            .maybeSingle();
+
+          if (error) {
+            console.error(`[Supabase] Error matching tenant phone number:`, error.message);
+          } else if (data) {
+            resolvedTenant = data;
+            console.log(`[Supabase] Tenant successfully matched: ${resolvedTenant.id}`);
+          }
+        }
+
+        // Fallback to default admin tenant if not found
+        if (!resolvedTenant) {
+          console.log(`[Supabase] Tenant not found by phone number. Falling back to default admin tenant...`);
+          const { data, error } = await supabase
+            .from('tenants')
+            .select('id')
+            .eq('owner_email', 'admin@detailing.com')
+            .limit(1)
+            .maybeSingle();
+
+          if (data) {
+            resolvedTenant = data;
+          }
+        }
+
+        if (resolvedTenant) {
+          tenantId = resolvedTenant.id;
+        } else {
+          // If the default tenant does not exist at all, create it.
+          console.log(`[Supabase] Default tenant not found. Provisioning...`);
+          const { data: insertedTenant, error: insertTenantError } = await supabase
+            .from('tenants')
+            .insert({
+              business_name: 'Premium Car Detailing Shop',
+              owner_email: 'admin@detailing.com',
+              whatsapp_phone_number_id: businessPhoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID,
+              whatsapp_access_token: process.env.META_ACCESS_TOKEN
+            })
+            .select('id')
+            .single();
+
+          if (insertTenantError) {
+            throw new Error(`Failed to create default tenant: ${insertTenantError.message}`);
+          }
+          tenantId = insertedTenant.id;
+          console.log(`[Supabase] Successfully provisioned default tenant: ${tenantId}`);
+        }
+
+        // Step A: Find or Create Conversation
+        const { data: existingConversation, error: convSelectError } = await supabase
+          .from('conversations')
+          .select('id, is_ai_active')
+          .eq('tenant_id', tenantId)
+          .eq('customer_phone', customerPhone)
+          .limit(1)
+          .single();
+
+        if (existingConversation) {
+          conversationId = existingConversation.id;
+          isAiActive = existingConversation.is_ai_active;
+          console.log(`[Supabase] Found existing conversation: ${conversationId}, is_ai_active: ${isAiActive}`);
+        } else {
+          // Create a new conversation if it doesn't exist
+          const { data: newConversation, error: convInsertError } = await supabase
+            .from('conversations')
+            .insert({
+              tenant_id: tenantId,
+              customer_phone: customerPhone,
+              customer_name: customerName,
+              is_ai_active: true
+            })
+            .select('id, is_ai_active')
+            .single();
+
+          if (convInsertError) {
+            throw new Error(`Failed to create conversation: ${convInsertError.message}`);
+          }
+          conversationId = newConversation.id;
+          isAiActive = newConversation.is_ai_active;
+          console.log(`[Supabase] Created new conversation: ${conversationId}, is_ai_active: ${isAiActive}`);
+        }
+
+        // Step B: Save Message
+        const { error: msgInsertError } = await supabase
+          .from('messages')
+          .insert({
+            conversation_id: conversationId,
+            tenant_id: tenantId,
+            sender: 'customer',
+            message_text: messageText || ''
+          });
+
+        if (msgInsertError) {
+          throw new Error(`Failed to save message: ${msgInsertError.message}`);
+        }
+        console.log(`[Supabase] Successfully saved customer message for conversation ${conversationId}`);
+
+        // Step C: Update Timestamp
+        const { error: convUpdateError } = await supabase
+          .from('conversations')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', conversationId);
+
+        if (convUpdateError) {
+          console.error(`[Supabase] ⚠️ Warning: Failed to update conversation timestamp: ${convUpdateError.message}`);
+        } else {
+          console.log(`[Supabase] Updated conversation updated_at timestamp`);
+        }
+
+      } catch (dbError) {
+        console.error('❌ Database operation failed inside webhook POST handler:', dbError.message || dbError);
       }
-    }
+
+      // Trigger the outbound AI response loop using Gemini and the Meta Graph API in the background.
+      if (messageText) {
+        try {
+          if (isAiActive) {
+            console.log(`[Webhook Background] Initiating primary AI pipeline for conversation: ${conversationId}`);
+
+            // Call the consolidated AI process function to get unified JSON response text
+            const responseText = await aiService.processAIResponse(customerPhone, customerName, messageText, tenantId);
+            console.log(`[Webhook Background] Unified JSON response text:`, responseText);
+
+            // Parse response JSON
+            const aiResponse = JSON.parse(responseText);
+            console.log(`[Webhook Background] Parsed AI Response:`, aiResponse);
+
+            // Extract reply_message and lead_extraction objects
+            const aiReplyText = aiResponse.reply_message || '';
+            const leadExtraction = aiResponse.lead_extraction || {};
+
+            // Determine if the reply contains a menu quick reply key
+            const hasMenu = aiReplyText.includes('[SHOW_MENU]');
+            const dbText = hasMenu
+              ? '[I showed the user the services menu]'
+              : aiReplyText;
+
+            // Log AI message to Supabase messages table
+            const { error: insertMsgError } = await supabase
+              .from('messages')
+              .insert({
+                conversation_id: conversationId,
+                tenant_id: tenantId,
+                sender: 'ai',
+                message_text: dbText
+              });
+
+            if (insertMsgError) {
+              console.error(`[Webhook Background] ⚠️ Failed to save AI response to DB:`, insertMsgError.message);
+            }
+
+            // Step A: Send reply_message via the WhatsApp API immediately
+            if (hasMenu) {
+              const cleanedReply = aiReplyText.replace('[SHOW_MENU]', '').trim();
+              if (cleanedReply) {
+                await whatsappService.sendWhatsAppMessage(customerPhone, cleanedReply);
+              }
+              await whatsappService.sendWhatsAppInteractiveMenu(customerPhone);
+            } else {
+              await whatsappService.sendWhatsAppMessage(customerPhone, aiReplyText);
+            }
+
+            // Step B: Check booking intent and perform upsert logic if true
+            if (leadExtraction.has_booking_intent === true) {
+              console.log(`[Webhook Background] Booking intent detected! Upserting lead details:`, leadExtraction);
+
+              // Perform an UPSERT against the 'leads' table matching on customer_phone
+              const { data: existingLead, error: leadError } = await supabase
+                .from('leads')
+                .select('id')
+                .eq('customer_phone', customerPhone)
+                .limit(1)
+                .maybeSingle();
+
+              if (leadError) {
+                console.error(`[Webhook Background] Error searching for existing lead:`, leadError.message);
+              }
+
+              const leadData = {
+                tenant_id: tenantId,
+                conversation_id: conversationId,
+                customer_name: leadExtraction.customer_name || customerName || 'Unknown',
+                customer_phone: customerPhone,
+                service_requested: leadExtraction.requested_service || null,
+                urgency: leadExtraction.urgency || 'medium',
+                kanban_stage: 'new'
+              };
+
+              if (existingLead) {
+                console.log(`[Webhook Background] Lead exists. Updating lead with ID: ${existingLead.id}`);
+                const { error: updateError } = await supabase
+                  .from('leads')
+                  .update(leadData)
+                  .eq('id', existingLead.id);
+
+                if (updateError) {
+                  console.error(`[Webhook Background] Error updating lead:`, updateError.message);
+                }
+              } else {
+                console.log(`[Webhook Background] Lead does not exist. Creating new lead.`);
+                const { error: insertError } = await supabase
+                  .from('leads')
+                  .insert(leadData);
+
+                if (insertError) {
+                  console.error(`[Webhook Background] Error inserting lead:`, insertError.message);
+                }
+              }
+
+              console.log(`[Webhook Background] ✅ Structured lead successfully saved/updated for ${customerPhone}`);
+            } else {
+              console.log(`[Webhook Background] No booking/service intent found for conversation ${conversationId}`);
+            }
+
+          } else {
+            console.log("AI Disabled by Human Operator for this session");
+          }
+        } catch (err) {
+          console.error('Error in consolidated AI background worker:', err);
+          
+          // Rollback the unanswered user message so it does not clutter future context windows
+          try {
+            await supabase
+              .from('messages')
+              .delete()
+              .eq('conversation_id', conversationId)
+              .eq('sender', 'customer')
+              .order('created_at', { ascending: false })
+              .limit(1);
+            console.log('[Webhook Background] Successfully rolled back customer message on error.');
+          } catch (rollbackErr) {
+            console.error('[Webhook Background] Failed to rollback customer message:', rollbackErr);
+          }
+
+          // Inform user of connection failure
+          await whatsappService.sendWhatsAppMessage(customerPhone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
+        }
+      }
+    })();
     return;
   }
 
   // --- Immediate 200 OK acknowledgment for all other events ---
   return res.status(200).send('EVENT_RECEIVED');
+}
+
+/**
+ * Handles manually sent human agent responses, triggers the WhatsApp message send,
+ * and logs the new message trace in the database.
+ */
+export async function sendMessageFromHuman(req, res) {
+  const { conversationId, customerPhone, messageText, tenantId } = req.body;
+
+  if (!conversationId || !customerPhone || !messageText || !tenantId) {
+    return res.status(400).json({ error: 'Missing required parameters.' });
+  }
+
+  try {
+    console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
+    // 1. Send manual message via WhatsApp Cloud API
+    await whatsappService.sendWhatsAppMessage(customerPhone, messageText);
+
+    console.log(`[Supabase] Saving human message for conversation ${conversationId}...`);
+    // 2. Persist the human's response in the Supabase messages table
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: conversationId,
+        tenant_id: tenantId,
+        sender: 'human',
+        message_text: messageText
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to save human message to Supabase: ${error.message}`);
+    }
+
+    // 3. Update the conversation's updated_at timestamp
+    const { error: convUpdateError } = await supabase
+      .from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', conversationId);
+
+    if (convUpdateError) {
+      console.error(`[Supabase] ⚠️ Warning: Failed to update conversation timestamp: ${convUpdateError.message}`);
+    }
+
+    return res.status(200).json({ success: true, message: data });
+  } catch (error) {
+    console.error('❌ Error sending manual human message:', error.message || error);
+    return res.status(500).json({ error: error.message || 'Internal server error' });
+  }
 }
 
 /*

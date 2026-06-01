@@ -58,14 +58,14 @@ export async function ensureDefaultTenant() {
  * @param {string} name - Customer name.
  * @returns {Promise<string>} The conversation ID.
  */
-export async function resolveConversation(phone, name) {
-  const tenantId = await ensureDefaultTenant();
+export async function resolveConversation(phone, name, tenantId = null) {
+  const resolvedTenantId = tenantId || await ensureDefaultTenant();
 
   // 1. Try to find an existing active conversation for this phone number
   const { data: existing, error: selectError } = await supabase
     .from('conversations')
     .select('id')
-    .eq('tenant_id', tenantId)
+    .eq('tenant_id', resolvedTenantId)
     .eq('customer_phone', phone)
     .limit(1)
     .single();
@@ -82,7 +82,7 @@ export async function resolveConversation(phone, name) {
   // 2. If no conversation exists, insert a new one
   const { data: inserted, error: insertError } = await supabase
     .from('conversations')
-    .insert({ tenant_id: tenantId, customer_phone: phone, customer_name: name })
+    .insert({ tenant_id: resolvedTenantId, customer_phone: phone, customer_name: name })
     .select('id')
     .single();
 
@@ -156,8 +156,8 @@ export async function getKnowledgeBaseFaqs(tenantId) {
  * @param {string} sender - 'user' or 'model'
  * @param {string} text - Message body content
  */
-export async function insertMessage(conversationId, sender, text) {
-  const tenantId = await ensureDefaultTenant();
+export async function insertMessage(conversationId, sender, text, tenantId = null) {
+  const resolvedTenantId = tenantId || await ensureDefaultTenant();
 
   // Normalize sender naming between Gemini terminology ('user' / 'model') and Supabase schema ('customer' / 'ai')
   let dbSender = sender;
@@ -168,7 +168,7 @@ export async function insertMessage(conversationId, sender, text) {
     .from('messages')
     .insert({
       conversation_id: conversationId,
-      tenant_id: tenantId,
+      tenant_id: resolvedTenantId,
       sender: dbSender,
       message_text: text
     });
