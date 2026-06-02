@@ -94,7 +94,7 @@ export async function processAIResponse(phone, name, text, tenantId = null) {
   console.log(`[Supabase] Fetched ${(faqRows || []).length} FAQ entries for tenant_id: ${resolvedTenantId}`);
 
   // --- Prompt Efficiency: Construct clean instruction while stripping redundant spaces/newlines ---
-  let systemInstruction = `You are Saarthi, an elite AI assistant. You must respond to the user based on the provided Knowledge Base and instructions. 
+  let systemInstruction = `You are the LeadFlow AI Assistant, an elite, hyper-efficient sales representative. You must respond to the user based on the provided Knowledge Base and instructions. 
 CRITICAL: You must ALWAYS return your response in the following strict JSON format:
 {
   "reply_message": "The actual text response you want to send to the WhatsApp user.",
@@ -128,8 +128,13 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
   // Map database entries to role/parts formats required by Gemini structure
   let history = (recentMessages || []).map(msg => {
     let role = msg.sender;
-    if (role === 'customer') role = 'user';
-    else if (role === 'ai') role = 'model';
+    if (role === 'customer') {
+      role = 'user';
+    } else if (role === 'ai' || role === 'human') {
+      role = 'model';
+    } else {
+      role = 'user';
+    }
 
     // Strictly enforce length limits on historical items as well to prevent token leakage
     let msgText = msg.message_text || '';
@@ -230,9 +235,6 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
     return responseText;
   } else {
     console.error(`❌ Error: All attempts failed for ${name}. Last error:`, lastError);
-
-    // Rollback the unanswered user message so it does not clutter future context windows
-    await dbService.deleteLastCustomerMessage(conversationId, processedText);
     throw lastError || new Error(`Failed to generate response for ${name}.`);
   }
 }

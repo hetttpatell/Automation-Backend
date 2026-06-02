@@ -344,23 +344,13 @@ export async function handleWebhookEvent(req, res) {
           }
         } catch (err) {
           console.error('Error in consolidated AI background worker:', err);
-          
-          // Rollback the unanswered user message so it does not clutter future context windows
-          try {
-            await supabase
-              .from('messages')
-              .delete()
-              .eq('conversation_id', conversationId)
-              .eq('sender', 'customer')
-              .order('created_at', { ascending: false })
-              .limit(1);
-            console.log('[Webhook Background] Successfully rolled back customer message on error.');
-          } catch (rollbackErr) {
-            console.error('[Webhook Background] Failed to rollback customer message:', rollbackErr);
-          }
 
           // Inform user of connection failure
-          await whatsappService.sendWhatsAppMessage(customerPhone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
+          try {
+            await whatsappService.sendWhatsAppMessage(customerPhone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
+          } catch (sendErr) {
+            console.error('[Webhook Background] Failed to send error notification via WhatsApp:', sendErr.message || sendErr);
+          }
         }
       }
     })();
