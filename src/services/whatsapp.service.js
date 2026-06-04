@@ -37,11 +37,14 @@ export async function sendWhatsAppMessage(toPhone, messageText, phoneNumberId = 
 
     if (response.ok) {
       console.log(`Message successfully sent to ${toPhone}. Message ID: ${responseData.messages?.[0]?.id || 'unknown'}`);
+      return true;
     } else {
       console.error(`Meta API Error sending message to ${toPhone}:`, JSON.stringify(responseData));
+      return false;
     }
   } catch (err) {
     console.error(`Fetch error in sendWhatsAppMessage for ${toPhone}:`, err);
+    return false;
   }
 }
 
@@ -108,11 +111,14 @@ export async function sendWhatsAppInteractiveMenu(toPhone, phoneNumberId = env.W
 
     if (response.ok) {
       console.log(`Interactive menu successfully sent to ${toPhone}. Message ID: ${responseData.messages?.[0]?.id || 'unknown'}`);
+      return true;
     } else {
       console.error(`Meta API Error sending interactive menu to ${toPhone}:`, JSON.stringify(responseData));
+      return false;
     }
   } catch (err) {
     console.error(`Fetch error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err);
+    return false;
   }
 }
 

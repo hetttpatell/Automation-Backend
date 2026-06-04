@@ -250,6 +250,40 @@ export async function handleWebhookEvent(req, res) {
           if (isAiActive) {
             console.log(`[Webhook Background] Initiating primary AI pipeline for conversation: ${conversationId}`);
 
+            // Pre-flight Interception: Query incoming sender tenant's ai_credits_balance
+            const { data: tenantCredits, error: creditsError } = await supabase
+              .from('tenants')
+              .select('ai_credits_balance, whatsapp_phone_number_id, whatsapp_access_token')
+              .eq('id', resolvedTenantId)
+              .single();
+
+            if (creditsError) {
+              console.error(`[Webhook Background] Error checking credits for tenant ${resolvedTenantId}:`, creditsError.message);
+            }
+
+            const currentBalance = tenantCredits?.ai_credits_balance ?? 0;
+
+            if (currentBalance <= 0) {
+              console.log(`[Webhook Background] Hard Abort: Tenant ${resolvedTenantId} has ${currentBalance} credits.`);
+              const tenantPhoneId = tenantCredits?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
+              const tenantToken = tenantCredits?.whatsapp_access_token || env.META_ACCESS_TOKEN;
+              const fallbackMsg = "Our AI assistant is temporarily resting. A human teammate will step in shortly.";
+
+              // Dispatch default, non-AI fallback string via the Meta API
+              await whatsappService.sendWhatsAppMessage(customerPhone, fallbackMsg, tenantPhoneId, tenantToken);
+
+              // Log AI message to Supabase messages table
+              await supabase
+                .from('messages')
+                .insert({
+                  conversation_id: conversationId,
+                  tenant_id: resolvedTenantId,
+                  sender: 'ai',
+                  message_text: fallbackMsg
+                });
+              return; // Stop execution
+            }
+
             // Call the consolidated AI process function to get unified JSON response text
             const responseText = await aiService.processAIResponse(customerPhone, customerName, messageText, resolvedTenantId);
             console.log(`[Webhook Background] Unified JSON response text:`, responseText);
@@ -295,17 +329,40 @@ export async function handleWebhookEvent(req, res) {
             }
 
             // Step A: Send reply_message via the WhatsApp API immediately
-            const tenantPhoneId = resolvedTenantId?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
-            const tenantToken = resolvedTenantId?.whatsapp_access_token || env.META_ACCESS_TOKEN;
+            const tenantPhoneId = tenantCredits?.whatsapp_phone_number_id || resolvedTenantId?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
+            const tenantToken = tenantCredits?.whatsapp_access_token || resolvedTenantId?.whatsapp_access_token || env.META_ACCESS_TOKEN;
+
+            let messageSentSuccessfully = false;
 
             if (hasMenu) {
               const cleanedReply = aiReplyText.replace('[SHOW_MENU]', '').trim();
+              let textSent = true;
               if (cleanedReply) {
-                await whatsappService.sendWhatsAppMessage(customerPhone, cleanedReply, tenantPhoneId, tenantToken);
+                textSent = await whatsappService.sendWhatsAppMessage(customerPhone, cleanedReply, tenantPhoneId, tenantToken);
               }
-              await whatsappService.sendWhatsAppInteractiveMenu(customerPhone, tenantPhoneId, tenantToken);
+              const menuSent = await whatsappService.sendWhatsAppInteractiveMenu(customerPhone, tenantPhoneId, tenantToken);
+              messageSentSuccessfully = textSent || menuSent;
             } else {
-              await whatsappService.sendWhatsAppMessage(customerPhone, aiReplyText, tenantPhoneId, tenantToken);
+              messageSentSuccessfully = await whatsappService.sendWhatsAppMessage(customerPhone, aiReplyText, tenantPhoneId, tenantToken);
+            }
+
+            // Decrement: Upon an HTTP 200 message receipt confirmation from Meta, decrement the corresponding tenant's credits by exactly 1
+            if (messageSentSuccessfully) {
+              console.log(`[Webhook Background] Message successfully sent. Decrementing credits for tenant ${resolvedTenantId}`);
+              const { data: newBalance, error: decError } = await supabase.rpc('decrement_tenant_credits', {
+                tenant_id: resolvedTenantId
+              });
+
+              if (decError) {
+                console.error(`[Webhook Background] Error decrementing credits via RPC:`, decError.message);
+                // Fallback direct update
+                await supabase
+                  .from('tenants')
+                  .update({ ai_credits_balance: Math.max(0, currentBalance - 1) })
+                  .eq('id', resolvedTenantId);
+              } else {
+                console.log(`[Webhook Background] Credit decremented. New balance: ${newBalance}`);
+              }
             }
 
             // Step B: Check booking intent and perform upsert logic if true
