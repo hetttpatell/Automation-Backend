@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { env } from './config/env.js';
 import webhookRouter from './routes/webhook.routes.js';
+import calendarRouter from './routes/calendar.routes.js';
 
 // Instantiate Express application
 const app = express();
@@ -30,6 +31,11 @@ app.get('/health', (req, res) => {
 
 // Bind webhook router containing our GET and POST pathways
 app.use(webhookRouter);
+app.use(calendarRouter);
+
+// Initialize the Auto-Review Reputation Engine cron worker
+import { initReputationCron } from './services/reputation.service.js';
+initReputationCron();
 
 // Start listening for inbound connections on the configured HTTP Port
 app.listen(env.PORT, () => {

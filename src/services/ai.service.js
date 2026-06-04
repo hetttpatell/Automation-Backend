@@ -3,6 +3,7 @@ import * as dbService from './db.service.js';
 import * as whatsappService from './whatsapp.service.js';
 import OpenAI from 'openai';
 import { supabase } from '../config/supabase.js';
+import { checkAvailability, bookAppointment } from './calendar.service.js';
 
 // Initialize OpenAI client lazily to prevent crashes at startup when OPENAI_API_KEY is not defined.
 let openai = null;
@@ -38,6 +39,24 @@ function normalizeFaqInput(input) {
     .replace(/[^a-z0-9\s]/g, '')   // remove all characters except letters, numbers, spaces
     .replace(/\s+/g, ' ')           // collapse multiple consecutive spaces
     .trim();
+}
+
+/**
+ * Helper to strip markdown code blocks and extract JSON object boundaries.
+ */
+function cleanJsonString(str) {
+  let cleaned = str.trim();
+  cleaned = cleaned
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/, '')
+    .trim();
+
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+  return cleaned;
 }
 
 /**
@@ -104,7 +123,9 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
     "requested_service": "Extracted service or null",
     "urgency": "high, medium, low, or null"
   }
-}`;
+}
+
+You have access to the business's live calendar. If a customer wants to book, ALWAYS check availability first using your tools, offer them 2-3 available time slots, and once they confirm, use your booking tool to schedule it.`;
 
   if (baseInstruction) {
     systemInstruction += `\n\nAdditional Instructions:\n${baseInstruction}`;
@@ -114,6 +135,8 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
     const faqText = faqRows.map(row => `Q: ${row.question}\nA: ${row.answer}`).join('\n\n');
     systemInstruction += `\n\nUse the following knowledge base FAQs to answer customer questions when relevant:\n${faqText}`;
   }
+
+  systemInstruction += `\n\nYou MUST return your final response as a valid, raw JSON object without markdown formatting. Do not wrap it in \`\`\`json blocks.`;
 
   // Strip excessive spaces, tabs, and double-newlines to make prompt delivery highly token-efficient
   systemInstruction = systemInstruction
@@ -153,7 +176,7 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
     history.shift();
   }
 
-  // ── 4. Gemini API Call with Hard Token Limits & Robust Retries ───────────
+  // ── 4. Gemini API Call with Hard Token Limits, Function Calling & Robust Retries ──
   const maxRetries = 3;
   let responseData = null;
   let lastError = null;
@@ -162,53 +185,131 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`[Gemini AI] Attempting generation with model "${currentModel}" (Attempt ${attempt}/${maxRetries})...`);
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: history,
-        config: {
-          systemInstruction: systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: "OBJECT",
-            properties: {
-              reply_message: {
-                type: "STRING",
-                description: "The actual text response you want to send to the WhatsApp user."
-              },
-              lead_extraction: {
-                type: "OBJECT",
-                properties: {
-                  has_booking_intent: {
-                    type: "BOOLEAN",
-                    description: "true ONLY if they are trying to book, buy, or get a quote"
-                  },
-                  customer_name: {
-                    type: "STRING",
-                    description: "Extracted name or null"
-                  },
-                  requested_service: {
-                    type: "STRING",
-                    description: "Extracted service or null"
-                  },
-                  urgency: {
-                    type: "STRING",
-                    description: "high, medium, low, or null"
+      
+      let loopCount = 0;
+      const maxLoops = 5;
+      let currentContents = [...history];
+      let finalResponse = null;
+
+      while (loopCount < maxLoops) {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: currentContents,
+          config: {
+            systemInstruction: systemInstruction,
+            tools: [{
+              functionDeclarations: [
+                {
+                  name: "check_availability",
+                  description: "Returns available time slots for a given date by querying the Google Calendar API for free/busy intervals during the tenant's business hours.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      date: {
+                        type: "STRING",
+                        description: "The date to check in YYYY-MM-DD format."
+                      }
+                    },
+                    required: ["date"]
                   }
                 },
-                required: ["has_booking_intent", "customer_name", "requested_service", "urgency"]
-              }
-            },
-            required: ["reply_message", "lead_extraction"]
-          },
-          maxOutputTokens: 500,
-          temperature: 0.3
+                {
+                  name: "book_appointment",
+                  description: "Creates a calendar event on the connected Google Calendar and returns a success confirmation.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      customer_name: {
+                        type: "STRING",
+                        description: "The customer's name."
+                      },
+                      customer_phone: {
+                        type: "STRING",
+                        description: "The customer's phone number."
+                      },
+                      date: {
+                        type: "STRING",
+                        description: "The date of the appointment in YYYY-MM-DD format."
+                      },
+                      time: {
+                        type: "STRING",
+                        description: "The time of the appointment in HH:MM format (24-hour) or '10:00 AM' format."
+                      },
+                      service_requested: {
+                        type: "STRING",
+                        description: "The detailing/service requested by the customer."
+                      }
+                    },
+                    required: ["customer_name", "customer_phone", "date", "time", "service_requested"]
+                  }
+                }
+              ]
+            }],
+            maxOutputTokens: 500,
+            temperature: 0.3
+          }
+        });
+
+        console.log(`[Gemini AI] Raw response (loop ${loopCount}):`, JSON.stringify(response, null, 2));
+
+        const functionCalls = response.functionCalls;
+        if (!functionCalls || functionCalls.length === 0) {
+          finalResponse = response;
+          break;
         }
-      });
 
-      console.log("RAW GEMINI RESPONSE:", JSON.stringify(response, null, 2));
+        // Add model's turn (which contains function calls) to conversation history
+        currentContents.push({
+          role: 'model',
+          parts: response.candidates[0].content.parts
+        });
 
-      if (response) {
-        responseData = response;
+        // Execute all function calls requested by Gemini
+        const responseParts = [];
+        for (const call of functionCalls) {
+          const { name, args } = call;
+          console.log(`[Gemini Tool] Executing "${name}" with arguments:`, args);
+
+          let result;
+          try {
+            if (name === 'check_availability') {
+              result = await checkAvailability(resolvedTenantId, args.date);
+            } else if (name === 'book_appointment') {
+              result = await bookAppointment(
+                resolvedTenantId,
+                args.customer_name,
+                args.customer_phone,
+                args.date,
+                args.time,
+                args.service_requested
+              );
+            } else {
+              result = { error: `Function "${name}" is not implemented.` };
+            }
+          } catch (toolErr) {
+            console.error(`[Gemini Tool Error] Failed running "${name}":`, toolErr);
+            result = { error: toolErr.message || 'Execution failed.' };
+          }
+
+          responseParts.push({
+            functionResponse: {
+              name,
+              response: result
+            }
+          });
+        }
+
+        // Add tool's responses back to the conversation history
+        currentContents.push({
+          role: 'tool',
+          parts: responseParts
+        });
+
+        loopCount++;
+      }
+
+      if (finalResponse) {
+        responseData = finalResponse;
         break;
       }
     } catch (err) {
@@ -232,7 +333,7 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
     if (!responseText || responseText.trim() === '') {
       throw new Error("Empty response received from Gemini.");
     }
-    return responseText;
+    return cleanJsonString(responseText);
   } else {
     console.error(`❌ Error: All attempts failed for ${name}. Last error:`, lastError);
     throw lastError || new Error(`Failed to generate response for ${name}.`);

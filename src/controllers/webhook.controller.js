@@ -112,6 +112,7 @@ export async function handleWebhookEvent(req, res) {
     (async () => {
       let isAiActive = true;
       let tenantId = null;
+      let resolvedTenantId = null;
       let conversationId = null;
       try {
         console.log(`[Supabase] 🔄 Persisting incoming message from ${customerPhone}...`);
@@ -122,7 +123,7 @@ export async function handleWebhookEvent(req, res) {
           console.log(`[Supabase] 🔍 Resolving tenant by whatsapp_phone_number_id: ${businessPhoneNumberId}`);
           const { data, error } = await supabase
             .from('tenants')
-            .select('id')
+            .select('id, whatsapp_phone_number_id, whatsapp_access_token')
             .eq('whatsapp_phone_number_id', businessPhoneNumberId)
             .limit(1)
             .maybeSingle();
@@ -140,7 +141,7 @@ export async function handleWebhookEvent(req, res) {
           console.log(`[Supabase] Tenant not found by phone number. Falling back to default admin tenant...`);
           const { data, error } = await supabase
             .from('tenants')
-            .select('id')
+            .select('id, whatsapp_phone_number_id, whatsapp_access_token')
             .eq('owner_email', 'admin@detailing.com')
             .limit(1)
             .maybeSingle();
@@ -173,11 +174,16 @@ export async function handleWebhookEvent(req, res) {
           console.log(`[Supabase] Successfully provisioned default tenant: ${tenantId}`);
         }
 
+        resolvedTenantId = tenantId;
+        if (!resolvedTenantId) {
+          throw new Error("Webhook rejected: Tenant mapping failed.");
+        }
+
         // Step A: Find or Create Conversation
         const { data: existingConversation, error: convSelectError } = await supabase
           .from('conversations')
           .select('id, is_ai_active')
-          .eq('tenant_id', tenantId)
+          .eq('tenant_id', resolvedTenantId)
           .eq('customer_phone', customerPhone)
           .limit(1)
           .single();
@@ -191,7 +197,7 @@ export async function handleWebhookEvent(req, res) {
           const { data: newConversation, error: convInsertError } = await supabase
             .from('conversations')
             .insert({
-              tenant_id: tenantId,
+              tenant_id: resolvedTenantId,
               customer_phone: customerPhone,
               customer_name: customerName,
               is_ai_active: true
@@ -212,7 +218,7 @@ export async function handleWebhookEvent(req, res) {
           .from('messages')
           .insert({
             conversation_id: conversationId,
-            tenant_id: tenantId,
+            tenant_id: resolvedTenantId,
             sender: 'customer',
             message_text: messageText || ''
           });
@@ -245,11 +251,23 @@ export async function handleWebhookEvent(req, res) {
             console.log(`[Webhook Background] Initiating primary AI pipeline for conversation: ${conversationId}`);
 
             // Call the consolidated AI process function to get unified JSON response text
-            const responseText = await aiService.processAIResponse(customerPhone, customerName, messageText, tenantId);
+            const responseText = await aiService.processAIResponse(customerPhone, customerName, messageText, resolvedTenantId);
             console.log(`[Webhook Background] Unified JSON response text:`, responseText);
 
-            // Parse response JSON
-            const aiResponse = JSON.parse(responseText);
+            // Parse response JSON with robust stripping of markdown formatting
+            let cleanedResponseText = responseText.trim();
+            cleanedResponseText = cleanedResponseText
+              .replace(/^```(?:json)?\s*/i, '')
+              .replace(/```$/, '')
+              .trim();
+
+            const firstBrace = cleanedResponseText.indexOf('{');
+            const lastBrace = cleanedResponseText.lastIndexOf('}');
+            if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+              cleanedResponseText = cleanedResponseText.substring(firstBrace, lastBrace + 1);
+            }
+
+            const aiResponse = JSON.parse(cleanedResponseText);
             console.log(`[Webhook Background] Parsed AI Response:`, aiResponse);
 
             // Extract reply_message and lead_extraction objects
@@ -267,7 +285,7 @@ export async function handleWebhookEvent(req, res) {
               .from('messages')
               .insert({
                 conversation_id: conversationId,
-                tenant_id: tenantId,
+                tenant_id: resolvedTenantId,
                 sender: 'ai',
                 message_text: dbText
               });
@@ -277,14 +295,17 @@ export async function handleWebhookEvent(req, res) {
             }
 
             // Step A: Send reply_message via the WhatsApp API immediately
+            const tenantPhoneId = resolvedTenantId?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
+            const tenantToken = resolvedTenantId?.whatsapp_access_token || env.META_ACCESS_TOKEN;
+
             if (hasMenu) {
               const cleanedReply = aiReplyText.replace('[SHOW_MENU]', '').trim();
               if (cleanedReply) {
-                await whatsappService.sendWhatsAppMessage(customerPhone, cleanedReply);
+                await whatsappService.sendWhatsAppMessage(customerPhone, cleanedReply, tenantPhoneId, tenantToken);
               }
-              await whatsappService.sendWhatsAppInteractiveMenu(customerPhone);
+              await whatsappService.sendWhatsAppInteractiveMenu(customerPhone, tenantPhoneId, tenantToken);
             } else {
-              await whatsappService.sendWhatsAppMessage(customerPhone, aiReplyText);
+              await whatsappService.sendWhatsAppMessage(customerPhone, aiReplyText, tenantPhoneId, tenantToken);
             }
 
             // Step B: Check booking intent and perform upsert logic if true
@@ -304,8 +325,6 @@ export async function handleWebhookEvent(req, res) {
               }
 
               const leadData = {
-                tenant_id: tenantId,
-                conversation_id: conversationId,
                 customer_name: leadExtraction.customer_name || customerName || 'Unknown',
                 customer_phone: customerPhone,
                 service_requested: leadExtraction.requested_service || null,
@@ -317,7 +336,11 @@ export async function handleWebhookEvent(req, res) {
                 console.log(`[Webhook Background] Lead exists. Updating lead with ID: ${existingLead.id}`);
                 const { error: updateError } = await supabase
                   .from('leads')
-                  .update(leadData)
+                  .update({
+                    tenant_id: resolvedTenantId,
+                    conversation_id: conversationId,
+                    ...leadData
+                  })
                   .eq('id', existingLead.id);
 
                 if (updateError) {
@@ -327,7 +350,11 @@ export async function handleWebhookEvent(req, res) {
                 console.log(`[Webhook Background] Lead does not exist. Creating new lead.`);
                 const { error: insertError } = await supabase
                   .from('leads')
-                  .insert(leadData);
+                  .insert({
+                    tenant_id: resolvedTenantId,
+                    conversation_id: conversationId,
+                    ...leadData
+                  });
 
                 if (insertError) {
                   console.error(`[Webhook Background] Error inserting lead:`, insertError.message);
@@ -373,9 +400,19 @@ export async function sendMessageFromHuman(req, res) {
   }
 
   try {
+    // Fetch tenant credentials from database to support custom phone and token
+    const { data: tenant } = await supabase
+      .from('tenants')
+      .select('whatsapp_phone_number_id, whatsapp_access_token')
+      .eq('id', tenantId)
+      .single();
+
+    const tenantPhoneId = tenant?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
+    const tenantToken = tenant?.whatsapp_access_token || env.META_ACCESS_TOKEN;
+
     console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
     // 1. Send manual message via WhatsApp Cloud API
-    await whatsappService.sendWhatsAppMessage(customerPhone, messageText);
+    await whatsappService.sendWhatsAppMessage(customerPhone, messageText, tenantPhoneId, tenantToken);
 
     console.log(`[Supabase] Saving human message for conversation ${conversationId}...`);
     // 2. Persist the human's response in the Supabase messages table

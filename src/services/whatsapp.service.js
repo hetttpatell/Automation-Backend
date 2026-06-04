@@ -5,10 +5,7 @@ import { env } from '../config/env.js';
  * @param {string} toPhone - The recipient's phone number.
  * @param {string} messageText - The message body.
  */
-export async function sendWhatsAppMessage(toPhone, messageText) {
-  const phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = env.META_ACCESS_TOKEN;
-
+export async function sendWhatsAppMessage(toPhone, messageText, phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID, accessToken = env.META_ACCESS_TOKEN) {
   if (!phoneNumberId || !accessToken) {
     console.error('Error in sendWhatsAppMessage: Missing META_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables.');
     return;
@@ -52,10 +49,7 @@ export async function sendWhatsAppMessage(toPhone, messageText) {
  * Sends an interactive buttons menu (quick replies) to a customer's phone number via Meta's WhatsApp Cloud API.
  * @param {string} toPhone - The recipient's phone number.
  */
-export async function sendWhatsAppInteractiveMenu(toPhone) {
-  const phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = env.META_ACCESS_TOKEN;
-
+export async function sendWhatsAppInteractiveMenu(toPhone, phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID, accessToken = env.META_ACCESS_TOKEN) {
   if (!phoneNumberId || !accessToken) {
     console.error('Error in sendWhatsAppInteractiveMenu: Missing META_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables.');
     return;
