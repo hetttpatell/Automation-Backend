@@ -299,7 +299,21 @@ export async function handleWebhookEvent(req, res) {
               cleanedResponseText = cleanedResponseText.substring(firstBrace, lastBrace + 1);
             }
 
-            const aiResponse = JSON.parse(cleanedResponseText);
+            let aiResponse;
+            try {
+              aiResponse = JSON.parse(cleanedResponseText);
+            } catch (parseErr) {
+              console.error(`[Webhook Background] JSON parsing failed:`, parseErr.message);
+              aiResponse = {
+                reply_message: "I apologize, but I encountered an issue processing your request. Could you please rephrase or try again?",
+                lead_extraction: {
+                  has_booking_intent: false,
+                  customer_name: null,
+                  requested_service: null,
+                  urgency: null
+                }
+              };
+            }
             console.log(`[Webhook Background] Parsed AI Response:`, aiResponse);
 
             // Extract reply_message and lead_extraction objects

@@ -262,7 +262,7 @@ You have access to the business's live calendar. If a customer wants to book, AL
                 }
               ]
             }],
-            maxOutputTokens: 500,
+            maxOutputTokens: 800,
             temperature: 0.3
           }
         });
