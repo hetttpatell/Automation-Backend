@@ -210,7 +210,7 @@ export async function bookAppointment(tenantId, customerName, customerPhone, dat
 
     const event = {
       summary: `${serviceRequested || 'Service'} Booking - ${customerName}`,
-      description: `Customer Phone: ${customerPhone}\nService Requested: ${serviceRequested || 'Not Specified'}\nBooked automatically by LeadFlow SaaS AI Agent.`,
+      description: `Customer Phone: ${customerPhone}\nService Requested: ${serviceRequested || 'Not Specified'}\nBooked automatically by AI Assistant.`,
       start: {
         dateTime: startISO,
         timeZone: 'Asia/Kolkata'

@@ -104,16 +104,33 @@ export async function processAIResponse(phone, name, text, tenantId = null) {
   const resolvedTenantId = metadata.tenant_id || tenantId;
   console.log(`[Supabase] Resolved tenant_id: "${resolvedTenantId}" for conversation: "${conversationId}"`);
 
-  // Retrieve custom tenant prompt instructions
-  const baseInstruction = await dbService.getTenantInstruction(resolvedTenantId);
-  console.log(`[Supabase] Fetched base system instruction of length: ${baseInstruction.length}`);
+  // Retrieve custom tenant prompt instructions & business name
+  const { data: tenantData } = await supabase
+    .from('tenants')
+    .select('business_name, ai_system_instruction')
+    .eq('id', resolvedTenantId)
+    .single();
+
+  const businessName = tenantData?.business_name;
+  const baseInstruction = tenantData?.ai_system_instruction || '';
+  console.log(`[Supabase] Fetched base system instruction of length: ${baseInstruction.length} for business: ${businessName}`);
+
+  const isConfigured = businessName && businessName.trim() !== '' && businessName.trim().toLowerCase() !== 'my business';
+  const resolvedBusinessName = isConfigured ? businessName : 'Business Strategy & Consultancy';
+
+  // Remove any legacy "LeadFlow" branding from the dynamic instructions as a fallback safety
+  const baseInstructionClean = baseInstruction
+    .replace(/LeadFlow AI Assistant/gi, `AI Assistant for ${resolvedBusinessName}`)
+    .replace(/LeadFlow/gi, resolvedBusinessName);
 
   // Retrieve all FAQs associated with this tenant
   const faqRows = await dbService.getKnowledgeBaseFaqs(resolvedTenantId);
   console.log(`[Supabase] Fetched ${(faqRows || []).length} FAQ entries for tenant_id: ${resolvedTenantId}`);
 
   // --- Prompt Efficiency: Construct clean instruction while stripping redundant spaces/newlines ---
-  let systemInstruction = `You are the LeadFlow AI Assistant, an elite, hyper-efficient sales representative. You must respond to the user based on the provided Knowledge Base and instructions. 
+  let systemInstruction = `You are the AI Assistant for ${resolvedBusinessName}, an elite, hyper-efficient representative. You must respond to the user based on the provided Knowledge Base and instructions. 
+When greeting the customer or starting the conversation, welcome them with: "Hello! Welcome to our ${resolvedBusinessName} assistant. How can we help you today?"
+
 CRITICAL: You must ALWAYS return your response in the following strict JSON format:
 {
   "reply_message": "The actual text response you want to send to the WhatsApp user.",
@@ -127,8 +144,8 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
 
 You have access to the business's live calendar. If a customer wants to book, ALWAYS check availability first using your tools, offer them 2-3 available time slots, and once they confirm, use your booking tool to schedule it.`;
 
-  if (baseInstruction) {
-    systemInstruction += `\n\nAdditional Instructions:\n${baseInstruction}`;
+  if (baseInstructionClean) {
+    systemInstruction += `\n\nAdditional Instructions:\n${baseInstructionClean}`;
   }
 
   if (faqRows && faqRows.length > 0) {
@@ -407,9 +424,17 @@ export async function generateAndSendAIResponse(conversationId, customerPhone, i
       .eq('id', tenantId)
       .single();
 
-    const systemInstruction = tenantData?.ai_system_instruction || '';
+    const baseInstruction = tenantData?.ai_system_instruction || '';
     const aiTone = tenantData?.ai_tone || 'professional';
-    const businessName = tenantData?.business_name || 'this business';
+    const businessNameRaw = tenantData?.business_name;
+
+    const isConfigured = businessNameRaw && businessNameRaw.trim() !== '' && businessNameRaw.trim().toLowerCase() !== 'my business';
+    const businessName = isConfigured ? businessNameRaw : 'Business Strategy & Consultancy';
+
+    // Remove any legacy "LeadFlow" branding from the dynamic instructions as a fallback safety
+    const baseInstructionClean = baseInstruction
+      .replace(/LeadFlow AI Assistant/gi, `AI Assistant for ${businessName}`)
+      .replace(/LeadFlow/gi, businessName);
 
     // 3. Fetch knowledge_base FAQs
     const { data: faqs, error: faqsError } = await supabase
@@ -420,8 +445,8 @@ export async function generateAndSendAIResponse(conversationId, customerPhone, i
     // Step B (Prompt Construction): Construct system prompt
     let systemPrompt = `You are a helpful WhatsApp assistant for ${businessName}. Use the following knowledge base to answer the user. If the answer isn't in the knowledge base, politely say you don't know and offer to connect them to a human.\n`;
     systemPrompt += `AI Tone: ${aiTone}\n`;
-    if (systemInstruction) {
-      systemPrompt += `System Prompt / Tone Rules:\n${systemInstruction}\n`;
+    if (baseInstructionClean) {
+      systemPrompt += `System Prompt / Tone Rules:\n${baseInstructionClean}\n`;
     }
 
     if (faqs && faqs.length > 0) {
