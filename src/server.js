@@ -3,12 +3,16 @@ import cors from 'cors';
 import { env } from './config/env.js';
 import webhookRouter from './routes/webhook.routes.js';
 import calendarRouter from './routes/calendar.routes.js';
+import razorpayRouter from './routes/razorpay.routes.js';
 
 // Instantiate Express application
 const app = express();
 
 // Enable Cross-Origin Resource Sharing (CORS) globally to allow frontend connections
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true,
+}));
 
 // Parse incoming payloads containing JSON format, essential for Meta's POST notifications
 app.use(express.json());
@@ -29,9 +33,10 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Bind webhook router containing our GET and POST pathways
+// Bind routers containing our GET and POST pathways
 app.use(webhookRouter);
 app.use(calendarRouter);
+app.use(razorpayRouter);
 
 // Initialize the Auto-Review Reputation Engine cron worker
 import { initReputationCron } from './services/reputation.service.js';

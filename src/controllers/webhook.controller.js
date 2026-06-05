@@ -265,12 +265,10 @@ export async function handleWebhookEvent(req, res) {
 
             if (currentBalance <= 0) {
               console.log(`[Webhook Background] Hard Abort: Tenant ${resolvedTenantId} has ${currentBalance} credits.`);
-              const tenantPhoneId = tenantCredits?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
-              const tenantToken = tenantCredits?.whatsapp_access_token || env.META_ACCESS_TOKEN;
               const fallbackMsg = "Our AI assistant is temporarily resting. A human teammate will step in shortly.";
 
               // Dispatch default, non-AI fallback string via the Meta API
-              await whatsappService.sendWhatsAppMessage(customerPhone, fallbackMsg, tenantPhoneId, tenantToken);
+              await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, fallbackMsg);
 
               // Log AI message to Supabase messages table
               await supabase
@@ -329,21 +327,18 @@ export async function handleWebhookEvent(req, res) {
             }
 
             // Step A: Send reply_message via the WhatsApp API immediately
-            const tenantPhoneId = tenantCredits?.whatsapp_phone_number_id || resolvedTenantId?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
-            const tenantToken = tenantCredits?.whatsapp_access_token || resolvedTenantId?.whatsapp_access_token || env.META_ACCESS_TOKEN;
-
             let messageSentSuccessfully = false;
 
             if (hasMenu) {
               const cleanedReply = aiReplyText.replace('[SHOW_MENU]', '').trim();
               let textSent = true;
               if (cleanedReply) {
-                textSent = await whatsappService.sendWhatsAppMessage(customerPhone, cleanedReply, tenantPhoneId, tenantToken);
+                textSent = await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, cleanedReply);
               }
-              const menuSent = await whatsappService.sendWhatsAppInteractiveMenu(customerPhone, tenantPhoneId, tenantToken);
+              const menuSent = await whatsappService.sendWhatsAppInteractiveMenu(resolvedTenantId, customerPhone);
               messageSentSuccessfully = textSent || menuSent;
             } else {
-              messageSentSuccessfully = await whatsappService.sendWhatsAppMessage(customerPhone, aiReplyText, tenantPhoneId, tenantToken);
+              messageSentSuccessfully = await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, aiReplyText);
             }
 
             // Decrement: Upon an HTTP 200 message receipt confirmation from Meta, decrement the corresponding tenant's credits by exactly 1
@@ -431,7 +426,7 @@ export async function handleWebhookEvent(req, res) {
 
           // Inform user of connection failure
           try {
-            await whatsappService.sendWhatsAppMessage(customerPhone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
+            await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
           } catch (sendErr) {
             console.error('[Webhook Background] Failed to send error notification via WhatsApp:', sendErr.message || sendErr);
           }
@@ -457,19 +452,9 @@ export async function sendMessageFromHuman(req, res) {
   }
 
   try {
-    // Fetch tenant credentials from database to support custom phone and token
-    const { data: tenant } = await supabase
-      .from('tenants')
-      .select('whatsapp_phone_number_id, whatsapp_access_token')
-      .eq('id', tenantId)
-      .single();
-
-    const tenantPhoneId = tenant?.whatsapp_phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID;
-    const tenantToken = tenant?.whatsapp_access_token || env.META_ACCESS_TOKEN;
-
     console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
     // 1. Send manual message via WhatsApp Cloud API
-    await whatsappService.sendWhatsAppMessage(customerPhone, messageText, tenantPhoneId, tenantToken);
+    await whatsappService.sendWhatsAppMessage(tenantId, customerPhone, messageText);
 
     console.log(`[Supabase] Saving human message for conversation ${conversationId}...`);
     // 2. Persist the human's response in the Supabase messages table

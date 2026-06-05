@@ -1,24 +1,58 @@
 import { env } from '../config/env.js';
+import { supabase } from '../config/supabase.js';
+
+/**
+ * Resolves WhatsApp credentials for a given tenant.
+ * Falls back to environment variables if tenant credentials are missing or tenantId is null.
+ * @param {string|null} tenantId - The tenant's ID.
+ * @returns {Promise<{resolvedToken: string, resolvedPhoneId: string}>}
+ */
+async function resolveCredentials(tenantId) {
+  let resolvedToken = process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || env.META_ACCESS_TOKEN;
+  let resolvedPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || env.WHATSAPP_PHONE_NUMBER_ID;
+
+  if (tenantId) {
+    try {
+      const { data: tenant, error } = await supabase
+        .from('tenants')
+        .select('whatsapp_access_token, whatsapp_phone_number_id')
+        .eq('id', tenantId)
+        .maybeSingle();
+
+      if (error) {
+        console.error(`[Supabase] Error fetching tenant credentials for ${tenantId}:`, error.message);
+      } else if (tenant) {
+        resolvedToken = tenant.whatsapp_access_token || resolvedToken;
+        resolvedPhoneId = tenant.whatsapp_phone_number_id || resolvedPhoneId;
+      }
+    } catch (err) {
+      console.error(`[Supabase] Exception fetching tenant credentials for ${tenantId}:`, err);
+    }
+  }
+
+  if (!resolvedToken || !resolvedPhoneId) {
+    throw new Error("Meta credentials missing for this tenant and no developer fallback found.");
+  }
+
+  return { resolvedToken, resolvedPhoneId };
+}
 
 /**
  * Sends a basic text message to a customer's phone number via Meta's WhatsApp Cloud API.
+ * @param {string|null} tenantId - The tenant's ID.
  * @param {string} toPhone - The recipient's phone number.
  * @param {string} messageText - The message body.
  */
-export async function sendWhatsAppMessage(toPhone, messageText, phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID, accessToken = env.META_ACCESS_TOKEN) {
-  if (!phoneNumberId || !accessToken) {
-    console.error('Error in sendWhatsAppMessage: Missing META_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables.');
-    return;
-  }
-
-  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-  console.log(`Sending WhatsApp message to ${toPhone}...`);
-
+export async function sendWhatsAppMessage(tenantId, toPhone, messageText) {
   try {
+    const { resolvedToken, resolvedPhoneId } = await resolveCredentials(tenantId);
+    const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
+    console.log(`Sending WhatsApp message to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${accessToken}`,
+        'Authorization': `Bearer ${resolvedToken}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -43,29 +77,26 @@ export async function sendWhatsAppMessage(toPhone, messageText, phoneNumberId = 
       return false;
     }
   } catch (err) {
-    console.error(`Fetch error in sendWhatsAppMessage for ${toPhone}:`, err);
+    console.error(`Fetch/Credential error in sendWhatsAppMessage for ${toPhone}:`, err.message || err);
     return false;
   }
 }
 
 /**
  * Sends an interactive buttons menu (quick replies) to a customer's phone number via Meta's WhatsApp Cloud API.
+ * @param {string|null} tenantId - The tenant's ID.
  * @param {string} toPhone - The recipient's phone number.
  */
-export async function sendWhatsAppInteractiveMenu(toPhone, phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID, accessToken = env.META_ACCESS_TOKEN) {
-  if (!phoneNumberId || !accessToken) {
-    console.error('Error in sendWhatsAppInteractiveMenu: Missing META_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables.');
-    return;
-  }
-
-  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-  console.log(`Sending interactive services menu to ${toPhone}...`);
-
+export async function sendWhatsAppInteractiveMenu(tenantId, toPhone) {
   try {
+    const { resolvedToken, resolvedPhoneId } = await resolveCredentials(tenantId);
+    const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
+    console.log(`Sending interactive services menu to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${accessToken}`,
+        'Authorization': `Bearer ${resolvedToken}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -117,7 +148,7 @@ export async function sendWhatsAppInteractiveMenu(toPhone, phoneNumberId = env.W
       return false;
     }
   } catch (err) {
-    console.error(`Fetch error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err);
+    console.error(`Fetch/Credential error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err.message || err);
     return false;
   }
 }

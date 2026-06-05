@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { verifyWebhook, handleWebhookEvent, sendMessageFromHuman } from '../controllers/webhook.controller.js';
+import { sendCampaign } from '../controllers/campaign.controller.js';
 
 // Instantiate Express Router instance
 const router = Router();
@@ -15,6 +16,10 @@ router.post('/webhook/whatsapp', handleWebhookEvent);
 // Route: POST /api/send-message
 // Triggers manually sent human agent responses.
 router.post('/api/send-message', sendMessageFromHuman);
+
+// Route: POST /api/campaigns/send
+// Triggers outbound campaign blast messages to targeted lead segments.
+router.post('/api/campaigns/send', sendCampaign);
 
 // Export router instance for application binding
 export default router;

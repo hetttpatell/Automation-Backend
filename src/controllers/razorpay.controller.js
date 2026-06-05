@@ -1,0 +1,321 @@
+import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
+import Razorpay from 'razorpay';
+
+// ─── Supabase Admin Client ──────────────────────────────────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+);
+
+// ─── Razorpay SDK Instance ──────────────────────────────────────────
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_dummy',
+  key_secret: process.env.RAZORPAY_KEY_SECRET || 'dummy_secret',
+});
+
+// ─── Pack definitions for credit top-ups ────────────────────────────
+const PACKS = {
+  mini: { amount: 49900, credits: 500 },     // ₹499 = 49900 Paisa
+  pro: { amount: 89900, credits: 1000 },      // ₹899 = 89900 Paisa
+  mega: { amount: 199900, credits: 2500 },    // ₹1,999 = 199900 Paisa
+};
+
+// ─── Plan ID mapping for subscriptions ──────────────────────────────
+const PLAN_MAPPING = {
+  starter: process.env.RAZORPAY_PLAN_STARTER || 'plan_starter_id',
+  growth: process.env.RAZORPAY_PLAN_GROWTH || 'plan_growth_id',
+  domination: process.env.RAZORPAY_PLAN_DOMINATION || 'plan_domination_id',
+};
+
+// ─── Helper: Extract & verify Supabase user from Bearer token ───────
+async function authenticateRequest(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { user: null, error: 'Missing or invalid Authorization header' };
+  }
+
+  const token = authHeader.split(' ')[1];
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+
+  if (error || !user) {
+    return { user: null, error: error?.message || 'Invalid token' };
+  }
+
+  return { user, error: null };
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// POST /api/razorpay/webhook
+// Handles incoming Razorpay webhook events (signature-verified, no auth)
+// ═════════════════════════════════════════════════════════════════════
+export async function handleRazorpayWebhook(req, res) {
+  const signature = req.headers['x-razorpay-signature'] || '';
+  const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+
+  try {
+    if (!signature) {
+      console.error('[Razorpay Webhook] Missing x-razorpay-signature header.');
+      return res.status(400).json({ error: 'Missing signature' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('hex');
+    const isValid = signature === expectedSignature;
+
+    if (!isValid) {
+      console.error('[Razorpay Webhook] Signature verification failed.');
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+
+    const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const event = payload.event;
+    console.log(`[Razorpay Webhook] Signature valid. Processing event: ${event}`);
+
+    // ── subscription.charged ─────────────────────────────────────────
+    if (event === 'subscription.charged') {
+      const subscription = payload.payload.subscription.entity;
+      const notes = subscription.notes || {};
+      const tenantId = notes.tenant_id;
+      const notesTier = notes.subscription_tier || '';
+
+      if (!tenantId) {
+        console.error('[Razorpay Webhook] tenant_id missing from subscription notes.');
+        return res.status(400).json({ error: 'Missing tenant_id in notes' });
+      }
+
+      // Map tier to credits balance and limit allocations
+      let tier = 'free';
+      let baseCredits = 50;
+
+      if (notesTier === 'starter') {
+        tier = 'starter';
+        baseCredits = 500;
+      } else if (notesTier === 'growth') {
+        tier = 'growth';
+        baseCredits = 2500;
+      } else if (notesTier === 'domination') {
+        tier = 'domination';
+        baseCredits = 10000;
+      } else {
+        // Fallback mapping based on Razorpay plan ID
+        const planId = subscription.plan_id;
+        if (planId?.includes('starter')) {
+          tier = 'starter';
+          baseCredits = 500;
+        } else if (planId?.includes('growth')) {
+          tier = 'growth';
+          baseCredits = 2500;
+        } else if (planId?.includes('domination')) {
+          tier = 'domination';
+          baseCredits = 10000;
+        }
+      }
+
+      console.log(`[Razorpay Webhook] Refilling credits for tenant: ${tenantId}. Tier: ${tier}, Credits: ${baseCredits}`);
+
+      const { error: updateError } = await supabase
+        .from('tenants')
+        .update({
+          subscription_tier: tier,
+          subscription_status: 'active',
+          ai_credits_balance: baseCredits,
+          ai_credits_limit: baseCredits,
+          razorpay_subscription_id: subscription.id,
+        })
+        .eq('id', tenantId);
+
+      if (updateError) {
+        console.error(`[Razorpay Webhook] Supabase update failed:`, updateError.message);
+        return res.status(500).json({ error: 'Database update failed' });
+      }
+    }
+    // ── order.paid / payment.captured ────────────────────────────────
+    else if (event === 'order.paid' || event === 'payment.captured') {
+      let entity = null;
+      if (event === 'order.paid') {
+        entity = payload.payload.order.entity;
+      } else {
+        entity = payload.payload.payment.entity;
+      }
+
+      if (!entity) {
+        return res.status(400).json({ error: 'Missing entity payload' });
+      }
+
+      const notes = entity.notes || {};
+      const tenantId = notes.tenant_id;
+      const purchaseType = notes.purchase_type;
+      const creditAmount = parseInt(notes.credit_amount || '0', 10);
+
+      if (purchaseType === 'top_up' && tenantId && creditAmount > 0) {
+        console.log(`[Razorpay Webhook] Incrementing credits for tenant ${tenantId} by ${creditAmount}`);
+
+        // Execute atomic increment in PostgreSQL
+        const { data: newBalance, error: rpcError } = await supabase.rpc('increment_tenant_credits', {
+          tenant_id: tenantId,
+          amount: creditAmount,
+        });
+
+        if (rpcError) {
+          console.error('[Razorpay Webhook] RPC credits increment failed. Attempting fallback direct update.', rpcError.message);
+
+          // Fallback direct mathematical increment
+          const { data: tenant } = await supabase
+            .from('tenants')
+            .select('ai_credits_balance, ai_credits_limit')
+            .eq('id', tenantId)
+            .single();
+
+          if (tenant) {
+            const currentBalance = tenant.ai_credits_balance || 0;
+            const currentLimit = tenant.ai_credits_limit || 0;
+            await supabase
+              .from('tenants')
+              .update({
+                ai_credits_balance: currentBalance + creditAmount,
+                ai_credits_limit: currentLimit + creditAmount,
+              })
+              .eq('id', tenantId);
+          }
+        } else {
+          console.log(`[Razorpay Webhook] Atomic increment completed successfully. New balance: ${newBalance}`);
+        }
+      }
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('[Razorpay Webhook Error]:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// POST /api/razorpay/create-order
+// Creates a Razorpay order for credit top-up purchases (authenticated)
+// ═════════════════════════════════════════════════════════════════════
+export async function createOrder(req, res) {
+  try {
+    // Authenticate via Bearer token
+    const { user, error: authError } = await authenticateRequest(req);
+    if (authError || !user || !user.email) {
+      return res.status(401).json({ error: 'Unauthorized user session.' });
+    }
+
+    const { packId } = req.body;
+    if (!packId || !PACKS[packId]) {
+      return res.status(400).json({ error: 'Invalid packId provided.' });
+    }
+
+    const pack = PACKS[packId];
+
+    // Fetch user's tenant
+    const { data: tenant, error: tenantError } = await supabase
+      .from('tenants')
+      .select('id')
+      .eq('owner_email', user.email)
+      .single();
+
+    if (tenantError || !tenant) {
+      return res.status(404).json({ error: 'Tenant not found.' });
+    }
+
+    console.log(`Creating Razorpay Order for top-up pack: ${packId} (${pack.credits} credits)`);
+
+    // Create Order in Razorpay
+    const order = await razorpay.orders.create({
+      amount: pack.amount,
+      currency: 'INR',
+      notes: {
+        tenant_id: tenant.id,
+        purchase_type: 'top_up',
+        credit_amount: String(pack.credits),
+      },
+    });
+
+    return res.status(200).json({
+      orderId: order.id,
+      amount: pack.amount,
+      credits: pack.credits,
+    });
+  } catch (error) {
+    console.error('Order create error:', error);
+    return res.status(500).json({ error: error.message || 'Internal Server Error' });
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// POST /api/razorpay/create-subscription
+// Creates a Razorpay subscription for plan upgrades (authenticated)
+// ═════════════════════════════════════════════════════════════════════
+export async function createSubscription(req, res) {
+  try {
+    // Authenticate via Bearer token
+    const { user, error: authError } = await authenticateRequest(req);
+    if (authError || !user || !user.email) {
+      return res.status(401).json({ error: 'Unauthorized user session.' });
+    }
+
+    const { planId } = req.body;
+    if (!planId || !PLAN_MAPPING[planId]) {
+      return res.status(400).json({ error: 'Invalid planId provided.' });
+    }
+
+    // Fetch user's tenant
+    const { data: tenant, error: tenantError } = await supabase
+      .from('tenants')
+      .select('id, business_name, owner_email, razorpay_customer_id')
+      .eq('owner_email', user.email)
+      .single();
+
+    if (tenantError || !tenant) {
+      return res.status(404).json({ error: 'Tenant not found.' });
+    }
+
+    let customerId = tenant.razorpay_customer_id;
+
+    // Create Razorpay Customer if it doesn't exist yet
+    if (!customerId) {
+      console.log(`Creating Razorpay Customer for business: ${tenant.business_name}`);
+      try {
+        const customer = await razorpay.customers.create({
+          name: tenant.business_name,
+          email: tenant.owner_email || user.email || '',
+        });
+        customerId = customer.id;
+
+        // Save Customer ID in Supabase
+        await supabase
+          .from('tenants')
+          .update({ razorpay_customer_id: customerId })
+          .eq('id', tenant.id);
+      } catch (err) {
+        console.error('Error creating Razorpay Customer:', err);
+        return res.status(500).json({ error: 'Failed to create payment customer context.' });
+      }
+    }
+
+    // Create Subscription in Razorpay
+    const razorpayPlanId = PLAN_MAPPING[planId];
+    console.log(`Creating Razorpay Subscription for plan: ${planId} (${razorpayPlanId})`);
+
+    const subscription = await razorpay.subscriptions.create({
+      plan_id: razorpayPlanId,
+      total_count: 12,
+      customer_notify: 1,
+      notes: {
+        tenant_id: tenant.id,
+        subscription_tier: planId,
+      },
+    });
+
+    return res.status(200).json(subscription);
+  } catch (error) {
+    console.error('Subscription create error:', error);
+    return res.status(500).json({ error: error.message || 'Internal Server Error' });
+  }
+}
