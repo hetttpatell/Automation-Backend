@@ -315,8 +315,16 @@ You have access to the business's live calendar. If a customer wants to book, AL
     } catch (err) {
       lastError = err;
       console.warn(`⚠️ Warning: Failed generating with model "${currentModel}" on attempt ${attempt}. Error: ${err.message || err}`);
-      if (err.status === 429 || (err.message && err.message.includes('429'))) {
-        console.warn(`[Gemini AI] 🔄 Quota exhausted for ${currentModel}. Automatically falling back to "gemini-2.5-flash-lite".`);
+      
+      const isRateLimit = err.status === 429 || (err.message && err.message.includes('429'));
+      const isServiceUnavailable = err.status === 503 || (err.message && (err.message.includes('503') || err.message.includes('UNAVAILABLE')));
+      
+      if (isRateLimit || isServiceUnavailable) {
+        if (isServiceUnavailable) {
+          console.warn("503 High Demand detected. Falling back to lite model.");
+        } else {
+          console.warn(`[Gemini AI] 🔄 Quota exhausted for ${currentModel}. Automatically falling back to "gemini-2.5-flash-lite".`);
+        }
         currentModel = 'gemini-2.5-flash-lite';
       }
     }
