@@ -137,7 +137,7 @@ export async function processAIResponse(phone, name, text, tenantId = null) {
 
   // --- Prompt Efficiency: Construct clean instruction while stripping redundant spaces/newlines ---
   let systemInstruction = `You are the AI Assistant for ${resolvedBusinessName}, an elite, hyper-efficient representative. You must respond to the user based on the provided Knowledge Base and instructions. 
-When greeting the customer or starting the conversation, welcome them with: "Hello! Welcome to our ${resolvedBusinessName} assistant. How can we help you today?"
+Never introduce yourself if the conversation has already started. Just answer the question.
 Your communication tone is: ${aiTone}. You must communicate primarily in ${botLanguage}.`;
 
   // --- Dynamic Business Context Injection ---
@@ -180,19 +180,9 @@ You have access to the business's live calendar. If a customer wants to book, AL
     systemInstruction += `\n\nUse the following knowledge base FAQs to answer customer questions when relevant:\n${faqText}`;
   }
 
-  systemInstruction += `\n\nYou MUST return your final response as a valid, raw JSON object without markdown formatting. Do not wrap it in \`\`\`json blocks.`;
-
-  // Strip excessive spaces, tabs, and double-newlines to make prompt delivery highly token-efficient
-  systemInstruction = systemInstruction
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n\s*\n/g, '\n\n')
-    .trim();
-
-  // ── 3. Build context window from the last 4 messages in the DB (Context Pruning) ──
-  // By requesting a max of the last 4 messages, we prevent long chats from bloating prompt length.
-  // NOTE: The current user message was already inserted into the DB by the webhook controller,
-  // so getRecentMessages will include it. We exclude it from history and pass it as the active turn.
-  const recentMessages = await dbService.getRecentMessages(conversationId, 4);
+  // ── 3. Fetch & Format History ──
+  // Ensure we pull the last 10 messages of the conversation (pulling 11 messages to account for the current message that has already been saved).
+  const recentMessages = await dbService.getRecentMessages(conversationId, 11);
 
   // Exclude the current incoming message (which is the last message in chronological order)
   const chatHistoryRaw = [...(recentMessages || [])];
@@ -200,35 +190,63 @@ You have access to the business's live calendar. If a customer wants to book, AL
     chatHistoryRaw.pop();
   }
 
-  // Map database entries to role/parts formats required by Gemini structure
-  const formattedHistory = chatHistoryRaw.map(msg => {
-    const role = msg.sender === 'customer' ? 'user' : 'model';
-    let msgText = msg.message_text || '';
-    if (role === 'model') {
+  // Limit history to the last 10 messages
+  const last10Messages = chatHistoryRaw.slice(-10);
+
+  const chatHistory = last10Messages.map(msg => {
+    const isAssistant = msg.sender === 'ai' || msg.sender === 'human';
+    let content = msg.message_text || '';
+
+    // For AI messages: the DB may store the full JSON response (e.g. {"reply_message":"..."}).
+    // Extract only the reply_message text to prevent raw JSON from leaking into context.
+    if (isAssistant) {
       try {
-        const parsed = JSON.parse(msgText);
+        const parsed = JSON.parse(content);
         if (parsed.reply_message) {
-          msgText = parsed.reply_message;
+          content = parsed.reply_message;
         }
       } catch (_) {
         // Not JSON — use as-is (e.g. human agent messages)
       }
     }
 
-    if (msgText.length > MAX_CHAR_LIMIT) {
-      msgText = msgText.substring(0, MAX_CHAR_LIMIT) + '...';
+    if (content.length > MAX_CHAR_LIMIT) {
+      content = content.substring(0, MAX_CHAR_LIMIT) + '...';
     }
 
     return {
-      role: role,
-      parts: [{ text: msgText }]
+      sender: msg.sender === 'customer' ? 'user' : 'ai',
+      text: content
     };
   });
 
-  // Safety: ensure context dialog always begins with a 'user' turn (not model response)
-  while (formattedHistory.length > 0 && formattedHistory[0].role === 'model') {
-    formattedHistory.shift();
-  }
+  const historyString = chatHistory.length > 0 
+    ? chatHistory.map(msg => `${msg.sender === 'user' ? 'CUSTOMER' : 'AI'}: ${msg.text}`).join('\n')
+    : "No previous history. This is a new conversation.";
+
+  // Strip excessive spaces, tabs, and double-newlines to make prompt delivery highly token-efficient
+  const compiledSystemInstruction = systemInstruction
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n/g, '\n\n')
+    .trim();
+
+  const currentMessage = processedText;
+  const finalPrompt = `
+${compiledSystemInstruction}
+
+CRITICAL CONVERSATIONAL RULES:
+1. Look at the CONVERSATION HISTORY below. If you or the user have already said hello, DO NOT repeat a welcome greeting.
+2. Continue the conversation naturally based on the last message.
+3. Only answer what is currently being asked.
+
+--- CONVERSATION HISTORY ---
+${historyString}
+----------------------------
+
+CUSTOMER'S NEW MESSAGE: "${currentMessage}"
+
+Respond using the exact JSON schema requested.
+`.trim();
 
   // ── 4. Gemini API Call with Hard Token Limits, Function Calling & Robust Retries ──
   const maxRetries = 3;
@@ -236,69 +254,74 @@ You have access to the business's live calendar. If a customer wants to book, AL
   let lastError = null;
   let currentModel = 'gemini-2.5-flash';
 
+  const tools = [{
+    functionDeclarations: [
+      {
+        name: "check_availability",
+        description: "Returns available time slots for a given date by querying the Google Calendar API for free/busy intervals during the tenant's business hours.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            date: {
+              type: "STRING",
+              description: "The date to check in YYYY-MM-DD format."
+            }
+          },
+          required: ["date"]
+        }
+      },
+      {
+        name: "book_appointment",
+        description: "Creates a calendar event on the connected Google Calendar and returns a success confirmation.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            customer_name: {
+              type: "STRING",
+              description: "The customer's name."
+            },
+            customer_phone: {
+              type: "STRING",
+              description: "The customer's phone number."
+            },
+            date: {
+              type: "STRING",
+              description: "The date of the appointment in YYYY-MM-DD format."
+            },
+            time: {
+              type: "STRING",
+              description: "The time of the appointment in HH:MM format (24-hour) or '10:00 AM' format."
+            },
+            service_requested: {
+              type: "STRING",
+              description: "The detailing/service requested by the customer."
+            }
+          },
+          required: ["customer_name", "customer_phone", "date", "time", "service_requested"]
+        }
+      }
+    ]
+  }];
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`[Gemini AI] Attempting generation with model "${currentModel}" (Attempt ${attempt}/${maxRetries})...`);
       
-      const chat = ai.chats.create({
+      const contents = [
+        { role: 'user', parts: [{ text: processedText }] }
+      ];
+
+      let currentResponse = await ai.models.generateContent({
         model: currentModel,
-        history: formattedHistory,
+        contents: contents,
         config: {
-          systemInstruction: systemInstruction,
-          tools: [{
-            functionDeclarations: [
-              {
-                name: "check_availability",
-                description: "Returns available time slots for a given date by querying the Google Calendar API for free/busy intervals during the tenant's business hours.",
-                parameters: {
-                  type: "OBJECT",
-                  properties: {
-                    date: {
-                      type: "STRING",
-                      description: "The date to check in YYYY-MM-DD format."
-                    }
-                  },
-                  required: ["date"]
-                }
-              },
-              {
-                name: "book_appointment",
-                description: "Creates a calendar event on the connected Google Calendar and returns a success confirmation.",
-                parameters: {
-                  type: "OBJECT",
-                  properties: {
-                    customer_name: {
-                      type: "STRING",
-                      description: "The customer's name."
-                    },
-                    customer_phone: {
-                      type: "STRING",
-                      description: "The customer's phone number."
-                    },
-                    date: {
-                      type: "STRING",
-                      description: "The date of the appointment in YYYY-MM-DD format."
-                    },
-                    time: {
-                      type: "STRING",
-                      description: "The time of the appointment in HH:MM format (24-hour) or '10:00 AM' format."
-                    },
-                    service_requested: {
-                      type: "STRING",
-                      description: "The detailing/service requested by the customer."
-                    }
-                  },
-                  required: ["customer_name", "customer_phone", "date", "time", "service_requested"]
-                }
-              }
-            ]
-          }],
+          systemInstruction: finalPrompt,
+          tools: tools,
           maxOutputTokens: 800,
           temperature: 0.3
         }
       });
 
-      let currentResponse = await chat.sendMessage({ message: processedText });
       let loopCount = 0;
       const maxLoops = 5;
       let finalResponse = null;
@@ -306,11 +329,22 @@ You have access to the business's live calendar. If a customer wants to book, AL
       while (loopCount < maxLoops) {
         console.log(`[Gemini AI] Raw response (loop ${loopCount}):`, JSON.stringify(currentResponse, null, 2));
 
-        const functionCalls = currentResponse.functionCalls;
-        if (!functionCalls || functionCalls.length === 0) {
+        const functionCalls = currentResponse.functionCalls || 
+          currentResponse.candidates?.[0]?.content?.parts
+            ?.filter(p => p.functionCall)
+            ?.map(p => p.functionCall) || [];
+
+        if (functionCalls.length === 0) {
           finalResponse = currentResponse;
           break;
         }
+
+        // Add model's turn to the conversation history
+        const modelContent = currentResponse.candidates?.[0]?.content || {
+          role: 'model',
+          parts: currentResponse.candidates?.[0]?.content?.parts || [{ text: currentResponse.text || '' }]
+        };
+        contents.push(modelContent);
 
         // Execute all function calls requested by Gemini
         const responseParts = [];
@@ -347,9 +381,22 @@ You have access to the business's live calendar. If a customer wants to book, AL
           });
         }
 
-        // Send the tool's responses back to the model in the chat session
-        currentResponse = await chat.sendMessage({
-          message: responseParts
+        // Add tool's responses back to contents history
+        contents.push({
+          role: 'tool',
+          parts: responseParts
+        });
+
+        // Send the tool's responses back to the model
+        currentResponse = await ai.models.generateContent({
+          model: currentModel,
+          contents: contents,
+          config: {
+            systemInstruction: finalPrompt,
+            tools: tools,
+            maxOutputTokens: 800,
+            temperature: 0.3
+          }
         });
 
         loopCount++;
