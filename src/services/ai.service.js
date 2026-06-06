@@ -104,15 +104,22 @@ export async function processAIResponse(phone, name, text, tenantId = null) {
   const resolvedTenantId = metadata.tenant_id || tenantId;
   console.log(`[Supabase] Resolved tenant_id: "${resolvedTenantId}" for conversation: "${conversationId}"`);
 
-  // Retrieve custom tenant prompt instructions & business name
+  // Retrieve custom tenant prompt instructions & all business context fields
   const { data: tenantData } = await supabase
     .from('tenants')
-    .select('business_name, ai_system_instruction')
+    .select('business_name, ai_system_instruction, services_text, hours_text, rules_text, payment_methods_text, target_audience_text, ai_tone, bot_language')
     .eq('id', resolvedTenantId)
     .single();
 
   const businessName = tenantData?.business_name;
   const baseInstruction = tenantData?.ai_system_instruction || '';
+  const servicesText = tenantData?.services_text || '';
+  const hoursText = tenantData?.hours_text || '';
+  const rulesText = tenantData?.rules_text || '';
+  const paymentMethodsText = tenantData?.payment_methods_text || '';
+  const targetAudienceText = tenantData?.target_audience_text || '';
+  const aiTone = tenantData?.ai_tone || 'Professional';
+  const botLanguage = tenantData?.bot_language || 'English';
   console.log(`[Supabase] Fetched base system instruction of length: ${baseInstruction.length} for business: ${businessName}`);
 
   const isConfigured = businessName && businessName.trim() !== '' && businessName.trim().toLowerCase() !== 'my business';
@@ -130,8 +137,26 @@ export async function processAIResponse(phone, name, text, tenantId = null) {
   // --- Prompt Efficiency: Construct clean instruction while stripping redundant spaces/newlines ---
   let systemInstruction = `You are the AI Assistant for ${resolvedBusinessName}, an elite, hyper-efficient representative. You must respond to the user based on the provided Knowledge Base and instructions. 
 When greeting the customer or starting the conversation, welcome them with: "Hello! Welcome to our ${resolvedBusinessName} assistant. How can we help you today?"
+Your communication tone is: ${aiTone}. You must communicate primarily in ${botLanguage}.`;
 
-CRITICAL: You must ALWAYS return your response in the following strict JSON format:
+  // --- Dynamic Business Context Injection ---
+  if (servicesText) {
+    systemInstruction += `\n\nOur Services & Pricing:\n${servicesText}`;
+  }
+  if (hoursText) {
+    systemInstruction += `\n\nOperating Hours & Location:\n${hoursText}`;
+  }
+  if (paymentMethodsText) {
+    systemInstruction += `\n\nPayment Methods Accepted:\n${paymentMethodsText}`;
+  }
+  if (targetAudienceText) {
+    systemInstruction += `\n\nTarget Audience & Brand Positioning:\n${targetAudienceText}`;
+  }
+  if (rulesText) {
+    systemInstruction += `\n\nBusiness Rules, Policies & FAQs:\n${rulesText}`;
+  }
+
+  systemInstruction += `\n\nCRITICAL: You must ALWAYS return your response in the following strict JSON format:
 {
   "reply_message": "The actual text response you want to send to the WhatsApp user.",
   "lead_extraction": {
@@ -145,7 +170,7 @@ CRITICAL: You must ALWAYS return your response in the following strict JSON form
 You have access to the business's live calendar. If a customer wants to book, ALWAYS check availability first using your tools, offer them 2-3 available time slots, and once they confirm, use your booking tool to schedule it.`;
 
   if (baseInstructionClean) {
-    systemInstruction += `\n\nAdditional Instructions:\n${baseInstructionClean}`;
+    systemInstruction += `\n\nAdditional Custom Instructions:\n${baseInstructionClean}`;
   }
 
   if (faqRows && faqRows.length > 0) {
@@ -417,16 +442,22 @@ export async function generateAndSendAIResponse(conversationId, customerPhone, i
     }
     const tenantId = convData.tenant_id;
 
-    // 2. Fetch the tenant settings (system prompt/tone)
+    // 2. Fetch the tenant settings (system prompt/tone) and all business context fields
     const { data: tenantData, error: tenantError } = await supabase
       .from('tenants')
-      .select('ai_system_instruction, ai_tone, business_name')
+      .select('ai_system_instruction, ai_tone, business_name, services_text, hours_text, rules_text, payment_methods_text, target_audience_text, bot_language')
       .eq('id', tenantId)
       .single();
 
     const baseInstruction = tenantData?.ai_system_instruction || '';
     const aiTone = tenantData?.ai_tone || 'professional';
     const businessNameRaw = tenantData?.business_name;
+    const servicesText = tenantData?.services_text || '';
+    const hoursText = tenantData?.hours_text || '';
+    const rulesText = tenantData?.rules_text || '';
+    const paymentMethodsText = tenantData?.payment_methods_text || '';
+    const targetAudienceText = tenantData?.target_audience_text || '';
+    const botLanguage = tenantData?.bot_language || 'English';
 
     const isConfigured = businessNameRaw && businessNameRaw.trim() !== '' && businessNameRaw.trim().toLowerCase() !== 'my business';
     const businessName = isConfigured ? businessNameRaw : 'Business Strategy & Consultancy';
@@ -442,11 +473,30 @@ export async function generateAndSendAIResponse(conversationId, customerPhone, i
       .select('question, answer')
       .eq('tenant_id', tenantId);
 
-    // Step B (Prompt Construction): Construct system prompt
+    // Step B (Prompt Construction): Construct system prompt with full business context
     let systemPrompt = `You are a helpful WhatsApp assistant for ${businessName}. Use the following knowledge base to answer the user. If the answer isn't in the knowledge base, politely say you don't know and offer to connect them to a human.\n`;
     systemPrompt += `AI Tone: ${aiTone}\n`;
+    systemPrompt += `Primary Language: ${botLanguage}\n`;
+
+    // Inject granular business context fields
+    if (servicesText) {
+      systemPrompt += `\nOur Services & Pricing:\n${servicesText}\n`;
+    }
+    if (hoursText) {
+      systemPrompt += `\nOperating Hours & Location:\n${hoursText}\n`;
+    }
+    if (paymentMethodsText) {
+      systemPrompt += `\nPayment Methods Accepted:\n${paymentMethodsText}\n`;
+    }
+    if (targetAudienceText) {
+      systemPrompt += `\nTarget Audience & Brand Positioning:\n${targetAudienceText}\n`;
+    }
+    if (rulesText) {
+      systemPrompt += `\nBusiness Rules, Policies & FAQs:\n${rulesText}\n`;
+    }
+
     if (baseInstructionClean) {
-      systemPrompt += `System Prompt / Tone Rules:\n${baseInstructionClean}\n`;
+      systemPrompt += `\nAdditional Custom Instructions:\n${baseInstructionClean}\n`;
     }
 
     if (faqs && faqs.length > 0) {
