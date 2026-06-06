@@ -10,7 +10,9 @@ const requiredEnvVars = [
   'SUPABASE_SERVICE_ROLE_KEY',
   'META_WEBHOOK_VERIFY_TOKEN',
   'WHATSAPP_PHONE_NUMBER_ID',
-  'META_ACCESS_TOKEN'
+  'META_ACCESS_TOKEN',
+  'META_APP_ID',
+  'META_APP_SECRET'
 ];
 
 // Loop through each required variable name to verify its definition
@@ -35,6 +37,8 @@ export const env = {
   META_WEBHOOK_VERIFY_TOKEN: process.env.META_WEBHOOK_VERIFY_TOKEN,
   WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID,
   META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN,
+  META_APP_ID: process.env.META_APP_ID,
+  META_APP_SECRET: process.env.META_APP_SECRET,
   PORT: process.env.PORT || 3000,
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,

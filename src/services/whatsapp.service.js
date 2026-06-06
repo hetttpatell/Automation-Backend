@@ -1,5 +1,6 @@
 import { env } from '../config/env.js';
 import { supabase } from '../config/supabase.js';
+import axios from 'axios';
 
 /**
  * Resolves WhatsApp credentials for a given tenant.
@@ -49,36 +50,35 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText) {
     const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
     console.log(`Sending WhatsApp message to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
 
-    const response = await fetch(url, {
-      method: 'POST',
+    let sanitizedText = messageText || '';
+    if (typeof sanitizedText === 'string') {
+      // Replace bullet points starting with * with •
+      sanitizedText = sanitizedText.replace(/^\s*\*\s+/gm, '• ');
+      // Replace double asterisks ** with single asterisks *
+      sanitizedText = sanitizedText.replace(/\*\*/g, '*');
+    }
+
+    const response = await axios.post(url, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: toPhone,
+      type: 'text',
+      text: {
+        preview_url: false,
+        body: sanitizedText
+      }
+    }, {
       headers: {
         'Authorization': `Bearer ${resolvedToken}`,
         'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: toPhone,
-        type: 'text',
-        text: {
-          preview_url: false,
-          body: messageText
-        }
-      })
+      }
     });
 
-    const responseData = await response.json();
-
-    if (response.ok) {
-      console.log(`Message successfully sent to ${toPhone}. Message ID: ${responseData.messages?.[0]?.id || 'unknown'}`);
-      return true;
-    } else {
-      console.error(`Meta API Error sending message to ${toPhone}:`, JSON.stringify(responseData));
-      return false;
-    }
+    console.log(`Message successfully sent to ${toPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
+    return true;
   } catch (err) {
-    console.error(`Fetch/Credential error in sendWhatsAppMessage for ${toPhone}:`, err.message || err);
-    return false;
+    console.error(`Axios/Credential error in sendWhatsAppMessage for ${toPhone}:`, err.response?.data || err.message || err);
+    throw err;
   }
 }
 
@@ -93,63 +93,54 @@ export async function sendWhatsAppInteractiveMenu(tenantId, toPhone) {
     const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
     console.log(`Sending interactive services menu to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
 
-    const response = await fetch(url, {
-      method: 'POST',
+    const response = await axios.post(url, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: toPhone,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: {
+          text: 'Here are our top services. What would you like to explore?'
+        },
+        action: {
+          buttons: [
+            {
+              type: 'reply',
+              reply: {
+                id: 'btn_exterior_wash',
+                title: 'Exterior Wash'
+              }
+            },
+            {
+              type: 'reply',
+              reply: {
+                id: 'btn_ceramic_coating',
+                title: 'Ceramic Coating'
+              }
+            },
+            {
+              type: 'reply',
+              reply: {
+                id: 'btn_speak_to_human',
+                title: 'Speak to Human'
+              }
+            }
+          ]
+        }
+      }
+    }, {
       headers: {
         'Authorization': `Bearer ${resolvedToken}`,
         'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: toPhone,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: {
-            text: 'Here are our top services. What would you like to explore?'
-          },
-          action: {
-            buttons: [
-              {
-                type: 'reply',
-                reply: {
-                  id: 'btn_exterior_wash',
-                  title: 'Exterior Wash'
-                }
-              },
-              {
-                type: 'reply',
-                reply: {
-                  id: 'btn_ceramic_coating',
-                  title: 'Ceramic Coating'
-                }
-              },
-              {
-                type: 'reply',
-                reply: {
-                  id: 'btn_speak_to_human',
-                  title: 'Speak to Human'
-                }
-              }
-            ]
-          }
-        }
-      })
+      }
     });
 
-    const responseData = await response.json();
-
-    if (response.ok) {
-      console.log(`Interactive menu successfully sent to ${toPhone}. Message ID: ${responseData.messages?.[0]?.id || 'unknown'}`);
-      return true;
-    } else {
-      console.error(`Meta API Error sending interactive menu to ${toPhone}:`, JSON.stringify(responseData));
-      return false;
-    }
+    console.log(`Interactive menu successfully sent to ${toPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
+    return true;
   } catch (err) {
-    console.error(`Fetch/Credential error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err.message || err);
-    return false;
+    console.error(`Axios/Credential error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err.response?.data || err.message || err);
+    throw err;
   }
 }
 

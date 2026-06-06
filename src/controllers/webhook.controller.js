@@ -437,12 +437,18 @@ export async function handleWebhookEvent(req, res) {
           }
         } catch (err) {
           console.error('Error in consolidated AI background worker:', err);
+          if (err.response && err.response.data) {
+            console.error('Meta API Error Details:', JSON.stringify(err.response.data, null, 2));
+          }
 
           // Inform user of connection failure
           try {
             await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, "Sorry, I am experiencing a temporary connection issue. Please try again in a moment.");
           } catch (sendErr) {
             console.error('[Webhook Background] Failed to send error notification via WhatsApp:', sendErr.message || sendErr);
+            if (sendErr.response && sendErr.response.data) {
+              console.error('Meta API Error Details (Notification):', JSON.stringify(sendErr.response.data, null, 2));
+            }
           }
         }
       }
@@ -500,6 +506,9 @@ export async function sendMessageFromHuman(req, res) {
     return res.status(200).json({ success: true, message: data });
   } catch (error) {
     console.error('❌ Error sending manual human message:', error.message || error);
+    if (error.response && error.response.data) {
+      console.error('Meta API Error Details:', JSON.stringify(error.response.data, null, 2));
+    }
     return res.status(500).json({ error: error.message || 'Internal server error' });
   }
 }

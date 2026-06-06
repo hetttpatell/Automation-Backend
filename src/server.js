@@ -4,6 +4,7 @@ import { env } from './config/env.js';
 import webhookRouter from './routes/webhook.routes.js';
 import calendarRouter from './routes/calendar.routes.js';
 import razorpayRouter from './routes/razorpay.routes.js';
+import metaRouter from './routes/meta.routes.js';
 
 // Instantiate Express application
 const app = express();
@@ -37,6 +38,7 @@ app.get('/health', (req, res) => {
 app.use(webhookRouter);
 app.use(calendarRouter);
 app.use(razorpayRouter);
+app.use(metaRouter);
 
 // Initialize the Auto-Review Reputation Engine cron worker
 import { initReputationCron } from './services/reputation.service.js';
