@@ -83,28 +83,67 @@ export async function exchangeToken(req, res) {
 
     console.log('[Meta OAuth] Token exchanged successfully. Fetching connected accounts...');
 
-    // ── Step C: Fetch WABA ID ──
-    let wabaResponse;
+    // ── Step C: Discover WABA ID via Debug Token ──
+    // With only whatsapp_business_management + whatsapp_business_messaging scopes,
+    // we cannot call /me/businesses or /me/whatsapp_business_accounts (those need
+    // the general business_management scope). Instead, use the Debug Token endpoint
+    // which returns `granular_scopes` containing the WABA IDs the token was granted.
+    let wabaId = null;
+
     try {
-      wabaResponse = await axios.get('https://graph.facebook.com/v19.0/me/whatsapp_business_accounts', {
-        headers: { Authorization: `Bearer ${longLivedToken}` }
+      const debugResponse = await axios.get('https://graph.facebook.com/v19.0/debug_token', {
+        params: {
+          input_token: longLivedToken,
+          access_token: `${env.META_APP_ID}|${env.META_APP_SECRET}`
+        }
       });
-    } catch (wabaErr) {
-      console.error('[Meta OAuth] Failed to fetch WhatsApp Business Accounts:', wabaErr.response?.data || wabaErr.message);
+
+      console.log('[Meta OAuth] Debug token response:', JSON.stringify(debugResponse.data, null, 2));
+
+      const tokenData = debugResponse.data?.data;
+      if (!tokenData) {
+        console.error('[Meta OAuth] Debug token returned no data payload.');
+        return res.status(400).json({ error: 'Could not inspect the access token. Debug endpoint returned no data.' });
+      }
+
+      // Extract WABA IDs from granular_scopes
+      // The whatsapp_business_management scope entry contains the WABA IDs the token can access
+      const granularScopes = tokenData.granular_scopes || [];
+      const wabmScope = granularScopes.find(
+        (s) => s.scope === 'whatsapp_business_management'
+      );
+
+      if (wabmScope && wabmScope.target_ids && wabmScope.target_ids.length > 0) {
+        wabaId = wabmScope.target_ids[0];
+        console.log(`[Meta OAuth] Discovered WABA ID from granular_scopes: ${wabaId}`);
+      }
+
+      // Fallback: also check whatsapp_business_messaging scope
+      if (!wabaId) {
+        const wbmScope = granularScopes.find(
+          (s) => s.scope === 'whatsapp_business_messaging'
+        );
+        if (wbmScope && wbmScope.target_ids && wbmScope.target_ids.length > 0) {
+          wabaId = wbmScope.target_ids[0];
+          console.log(`[Meta OAuth] Discovered WABA ID from whatsapp_business_messaging scope: ${wabaId}`);
+        }
+      }
+    } catch (debugErr) {
+      console.error('[Meta OAuth] Debug token inspection failed:', debugErr.response?.data || debugErr.message);
       return res.status(400).json({
-        error: 'Failed to fetch WhatsApp Business Accounts from Meta.',
-        details: wabaErr.response?.data || wabaErr.message
+        error: 'Failed to inspect access token via Meta Debug Token endpoint.',
+        details: debugErr.response?.data || debugErr.message
       });
     }
 
-    const wabaList = wabaResponse.data.data;
-    if (!wabaList || wabaList.length === 0) {
-      console.error('[Meta OAuth] No connected WhatsApp Business Accounts found for the user. Response:', wabaResponse.data);
-      return res.status(400).json({ error: 'No WhatsApp Business Accounts (WABA) associated with this account. Please set up one in Meta Developer Portal.' });
+    if (!wabaId) {
+      console.error('[Meta OAuth] No WABA ID found in granular_scopes. The user may not have shared a WhatsApp Business Account during login.');
+      return res.status(400).json({
+        error: 'No WhatsApp Business Account (WABA) was shared during the Meta login flow. Please re-connect and ensure you select a WhatsApp Business Account.'
+      });
     }
 
-    const wabaId = wabaList[0].id;
-    console.log(`[Meta OAuth] Found WABA ID: ${wabaId}. Fetching Phone Numbers...`);
+    console.log(`[Meta OAuth] Using WABA ID: ${wabaId}. Fetching Phone Numbers...`);
 
     // ── Step C (cont): Fetch Phone Number ID ──
     let phoneResponse;
