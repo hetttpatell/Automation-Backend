@@ -188,10 +188,18 @@ You have access to the business's live calendar. If a customer wants to book, AL
 
   // ── 3. Build context window from the last 4 messages in the DB (Context Pruning) ──
   // By requesting a max of the last 4 messages, we prevent long chats from bloating prompt length.
+  // NOTE: The current user message was already inserted into the DB by the webhook controller,
+  // so getRecentMessages will include it. We exclude it from history and pass it as the active turn.
   const recentMessages = await dbService.getRecentMessages(conversationId, 4);
 
+  // Exclude the current incoming message (which is the last message in chronological order)
+  const chatHistoryRaw = [...(recentMessages || [])];
+  if (chatHistoryRaw.length > 0 && chatHistoryRaw[chatHistoryRaw.length - 1].sender === 'customer') {
+    chatHistoryRaw.pop();
+  }
+
   // Map database entries to role/parts formats required by Gemini structure
-  let history = (recentMessages || []).map(msg => {
+  let history = chatHistoryRaw.map(msg => {
     let role = msg.sender;
     if (role === 'customer') {
       role = 'user';
@@ -201,8 +209,22 @@ You have access to the business's live calendar. If a customer wants to book, AL
       role = 'user';
     }
 
-    // Strictly enforce length limits on historical items as well to prevent token leakage
+    // For AI/model messages: the DB stores the full JSON response (e.g. {"reply_message":"...","lead_extraction":{...}}).
+    // We must extract ONLY the reply_message text to prevent raw JSON from leaking into the conversation context,
+    // which causes the model to repeat/append previous answers into new responses.
     let msgText = msg.message_text || '';
+    if (role === 'model') {
+      try {
+        const parsed = JSON.parse(msgText);
+        if (parsed.reply_message) {
+          msgText = parsed.reply_message;
+        }
+      } catch (_) {
+        // Not JSON — use as-is (e.g. human agent messages)
+      }
+    }
+
+    // Strictly enforce length limits on historical items as well to prevent token leakage
     if (msgText.length > MAX_CHAR_LIMIT) {
       msgText = msgText.substring(0, MAX_CHAR_LIMIT) + '...';
     }
@@ -230,7 +252,11 @@ You have access to the business's live calendar. If a customer wants to book, AL
       
       let loopCount = 0;
       const maxLoops = 5;
-      let currentContents = [...history];
+      // Start with history context and append the current user message as the active turn
+      let currentContents = [
+        ...history,
+        { role: 'user', parts: [{ text: processedText }] }
+      ];
       let finalResponse = null;
 
       while (loopCount < maxLoops) {
@@ -504,13 +530,52 @@ export async function generateAndSendAIResponse(conversationId, customerPhone, i
       systemPrompt += `\nKnowledge Base FAQs:\n${faqText}\n`;
     }
 
-    console.log(`[OpenAI Chat] Constructing completions API call with prompt length: ${systemPrompt.length}`);
+    // Step C (Fetch Chat History): Retrieve recent messages for conversational context
+    const recentMessages = await dbService.getRecentMessages(conversationId, 4);
 
-    // Step C (Call AI): Call OpenAI Chat Completions API
+    // Exclude the current incoming message (already saved to DB and is the last element)
+    const chatHistoryRaw = [...(recentMessages || [])];
+    if (chatHistoryRaw.length > 0 && chatHistoryRaw[chatHistoryRaw.length - 1].sender === 'customer') {
+      chatHistoryRaw.pop();
+    }
+
+    // Build chat history as distinct individual message objects.
+    // CRITICAL: Do NOT concatenate previous messages into a single text block.
+    // Each message must be its own {role, content} object in the messages array.
+    const chatHistory = chatHistoryRaw.map(msg => {
+      const isAssistant = msg.sender === 'ai' || msg.sender === 'human';
+      let content = msg.message_text || '';
+
+      // For AI messages: the DB may store the full JSON response (e.g. {"reply_message":"..."}).
+      // Extract only the reply_message text to prevent raw JSON from leaking into context.
+      if (isAssistant) {
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed.reply_message) {
+            content = parsed.reply_message;
+          }
+        } catch (_) {
+          // Not JSON — use as-is (e.g. human agent messages)
+        }
+      }
+
+      return {
+        sender: msg.sender === 'customer' ? 'user' : 'assistant',
+        text: content
+      };
+    });
+
+    console.log(`[OpenAI Chat] Constructing completions API call with prompt length: ${systemPrompt.length}, history entries: ${chatHistory.length}`);
+
+    // Step D (Call AI): Call OpenAI Chat Completions API with properly structured messages
     const completion = await getOpenAIClient().chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },
+        ...chatHistory.map(msg => ({
+          role: msg.sender === 'user' ? 'user' : 'assistant',
+          content: msg.text
+        })),
         { role: 'user', content: incomingMessage }
       ],
       max_tokens: 300,
