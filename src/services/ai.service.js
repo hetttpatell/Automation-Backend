@@ -199,19 +199,8 @@ You have access to the business's live calendar. If a customer wants to book, AL
   }
 
   // Map database entries to role/parts formats required by Gemini structure
-  let history = chatHistoryRaw.map(msg => {
-    let role = msg.sender;
-    if (role === 'customer') {
-      role = 'user';
-    } else if (role === 'ai' || role === 'human') {
-      role = 'model';
-    } else {
-      role = 'user';
-    }
-
-    // For AI/model messages: the DB stores the full JSON response (e.g. {"reply_message":"...","lead_extraction":{...}}).
-    // We must extract ONLY the reply_message text to prevent raw JSON from leaking into the conversation context,
-    // which causes the model to repeat/append previous answers into new responses.
+  const formattedHistory = chatHistoryRaw.map(msg => {
+    const role = msg.sender === 'customer' ? 'user' : 'model';
     let msgText = msg.message_text || '';
     if (role === 'model') {
       try {
@@ -224,7 +213,6 @@ You have access to the business's live calendar. If a customer wants to book, AL
       }
     }
 
-    // Strictly enforce length limits on historical items as well to prevent token leakage
     if (msgText.length > MAX_CHAR_LIMIT) {
       msgText = msgText.substring(0, MAX_CHAR_LIMIT) + '...';
     }
@@ -236,8 +224,8 @@ You have access to the business's live calendar. If a customer wants to book, AL
   });
 
   // Safety: ensure context dialog always begins with a 'user' turn (not model response)
-  while (history.length > 0 && history[0].role === 'model') {
-    history.shift();
+  while (formattedHistory.length > 0 && formattedHistory[0].role === 'model') {
+    formattedHistory.shift();
   }
 
   // ── 4. Gemini API Call with Hard Token Limits, Function Calling & Robust Retries ──
@@ -250,87 +238,77 @@ You have access to the business's live calendar. If a customer wants to book, AL
     try {
       console.log(`[Gemini AI] Attempting generation with model "${currentModel}" (Attempt ${attempt}/${maxRetries})...`);
       
+      const chat = ai.chats.create({
+        model: currentModel,
+        history: formattedHistory,
+        config: {
+          systemInstruction: systemInstruction,
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "check_availability",
+                description: "Returns available time slots for a given date by querying the Google Calendar API for free/busy intervals during the tenant's business hours.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    date: {
+                      type: "STRING",
+                      description: "The date to check in YYYY-MM-DD format."
+                    }
+                  },
+                  required: ["date"]
+                }
+              },
+              {
+                name: "book_appointment",
+                description: "Creates a calendar event on the connected Google Calendar and returns a success confirmation.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    customer_name: {
+                      type: "STRING",
+                      description: "The customer's name."
+                    },
+                    customer_phone: {
+                      type: "STRING",
+                      description: "The customer's phone number."
+                    },
+                    date: {
+                      type: "STRING",
+                      description: "The date of the appointment in YYYY-MM-DD format."
+                    },
+                    time: {
+                      type: "STRING",
+                      description: "The time of the appointment in HH:MM format (24-hour) or '10:00 AM' format."
+                    },
+                    service_requested: {
+                      type: "STRING",
+                      description: "The detailing/service requested by the customer."
+                    }
+                  },
+                  required: ["customer_name", "customer_phone", "date", "time", "service_requested"]
+                }
+              }
+            ]
+          }],
+          maxOutputTokens: 800,
+          temperature: 0.3
+        }
+      });
+
+      let currentResponse = await chat.sendMessage({ message: processedText });
       let loopCount = 0;
       const maxLoops = 5;
-      // Start with history context and append the current user message as the active turn
-      let currentContents = [
-        ...history,
-        { role: 'user', parts: [{ text: processedText }] }
-      ];
       let finalResponse = null;
 
       while (loopCount < maxLoops) {
-        const response = await ai.models.generateContent({
-          model: currentModel,
-          contents: currentContents,
-          config: {
-            systemInstruction: systemInstruction,
-            tools: [{
-              functionDeclarations: [
-                {
-                  name: "check_availability",
-                  description: "Returns available time slots for a given date by querying the Google Calendar API for free/busy intervals during the tenant's business hours.",
-                  parameters: {
-                    type: "OBJECT",
-                    properties: {
-                      date: {
-                        type: "STRING",
-                        description: "The date to check in YYYY-MM-DD format."
-                      }
-                    },
-                    required: ["date"]
-                  }
-                },
-                {
-                  name: "book_appointment",
-                  description: "Creates a calendar event on the connected Google Calendar and returns a success confirmation.",
-                  parameters: {
-                    type: "OBJECT",
-                    properties: {
-                      customer_name: {
-                        type: "STRING",
-                        description: "The customer's name."
-                      },
-                      customer_phone: {
-                        type: "STRING",
-                        description: "The customer's phone number."
-                      },
-                      date: {
-                        type: "STRING",
-                        description: "The date of the appointment in YYYY-MM-DD format."
-                      },
-                      time: {
-                        type: "STRING",
-                        description: "The time of the appointment in HH:MM format (24-hour) or '10:00 AM' format."
-                      },
-                      service_requested: {
-                        type: "STRING",
-                        description: "The detailing/service requested by the customer."
-                      }
-                    },
-                    required: ["customer_name", "customer_phone", "date", "time", "service_requested"]
-                  }
-                }
-              ]
-            }],
-            maxOutputTokens: 800,
-            temperature: 0.3
-          }
-        });
+        console.log(`[Gemini AI] Raw response (loop ${loopCount}):`, JSON.stringify(currentResponse, null, 2));
 
-        console.log(`[Gemini AI] Raw response (loop ${loopCount}):`, JSON.stringify(response, null, 2));
-
-        const functionCalls = response.functionCalls;
+        const functionCalls = currentResponse.functionCalls;
         if (!functionCalls || functionCalls.length === 0) {
-          finalResponse = response;
+          finalResponse = currentResponse;
           break;
         }
-
-        // Add model's turn (which contains function calls) to conversation history
-        currentContents.push({
-          role: 'model',
-          parts: response.candidates[0].content.parts
-        });
 
         // Execute all function calls requested by Gemini
         const responseParts = [];
@@ -367,10 +345,9 @@ You have access to the business's live calendar. If a customer wants to book, AL
           });
         }
 
-        // Add tool's responses back to the conversation history
-        currentContents.push({
-          role: 'tool',
-          parts: responseParts
+        // Send the tool's responses back to the model in the chat session
+        currentResponse = await chat.sendMessage({
+          message: responseParts
         });
 
         loopCount++;
