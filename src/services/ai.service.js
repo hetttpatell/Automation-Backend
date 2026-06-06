@@ -89,9 +89,10 @@ export async function processAIResponse(phone, name, text, tenantId = null) {
       reply_message: cachedAnswer,
       lead_extraction: {
         has_booking_intent: false,
+        requires_human_support: false,
+        intent_category: 'GENERAL',
         customer_name: null,
-        requested_service: null,
-        urgency: null
+        summary_of_needs: null
       }
     });
   }
@@ -160,10 +161,11 @@ Your communication tone is: ${aiTone}. You must communicate primarily in ${botLa
 {
   "reply_message": "The actual text response you want to send to the WhatsApp user.",
   "lead_extraction": {
-    "has_booking_intent": boolean (true ONLY if they are trying to book, buy, or get a quote),
-    "customer_name": "Extracted name or null",
-    "requested_service": "Extracted service or null",
-    "urgency": "high, medium, low, or null"
+    "has_booking_intent": boolean, // True ONLY if they want to buy/book something
+    "requires_human_support": boolean, // True if they have a complaint, need a refund, or ask to speak to a human
+    "intent_category": "SALES" | "SUPPORT" | "GENERAL",
+    "customer_name": "string or null",
+    "summary_of_needs": "Short string summarizing what they want (e.g., 'Wants to cancel party tomorrow')"
   }
 }
 

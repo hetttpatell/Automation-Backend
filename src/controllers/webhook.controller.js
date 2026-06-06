@@ -308,9 +308,10 @@ export async function handleWebhookEvent(req, res) {
                 reply_message: "I apologize, but I encountered an issue processing your request. Could you please rephrase or try again?",
                 lead_extraction: {
                   has_booking_intent: false,
+                  requires_human_support: false,
+                  intent_category: 'GENERAL',
                   customer_name: null,
-                  requested_service: null,
-                  urgency: null
+                  summary_of_needs: null
                 }
               };
             }
@@ -374,10 +375,10 @@ export async function handleWebhookEvent(req, res) {
               }
             }
 
-            // Step B: Check booking intent and perform upsert logic if true
-            if (leadExtraction.has_booking_intent === true) {
-              console.log(`[Webhook Background] Booking intent detected! Upserting lead details:`, leadExtraction);
-
+            // Step B: Check booking intent or support handoff and perform upsert logic if true
+            if (leadExtraction.has_booking_intent === true || leadExtraction.requires_human_support === true) {
+              console.log(`[Webhook Background] Booking or support intent detected! Upserting lead details:`, leadExtraction);
+ 
               // Perform an UPSERT against the 'leads' table matching on customer_phone
               const { data: existingLead, error: leadError } = await supabase
                 .from('leads')
@@ -385,19 +386,22 @@ export async function handleWebhookEvent(req, res) {
                 .eq('customer_phone', customerPhone)
                 .limit(1)
                 .maybeSingle();
-
+ 
               if (leadError) {
                 console.error(`[Webhook Background] Error searching for existing lead:`, leadError.message);
               }
-
+ 
               const leadData = {
                 customer_name: leadExtraction.customer_name || customerName || 'Unknown',
                 customer_phone: customerPhone,
-                service_requested: leadExtraction.requested_service || null,
-                urgency: leadExtraction.urgency || 'medium',
-                kanban_stage: 'new'
+                service_requested: leadExtraction.requested_service || leadExtraction.summary_of_needs || null,
+                urgency: leadExtraction.urgency || (leadExtraction.requires_human_support ? 'high' : 'medium'),
+                kanban_stage: 'new',
+                requires_human_support: leadExtraction.requires_human_support || false,
+                intent_category: leadExtraction.intent_category || 'GENERAL',
+                summary_of_needs: leadExtraction.summary_of_needs || null
               };
-
+ 
               if (existingLead) {
                 console.log(`[Webhook Background] Lead exists. Updating lead with ID: ${existingLead.id}`);
                 const { error: updateError } = await supabase
@@ -408,7 +412,7 @@ export async function handleWebhookEvent(req, res) {
                     ...leadData
                   })
                   .eq('id', existingLead.id);
-
+ 
                 if (updateError) {
                   console.error(`[Webhook Background] Error updating lead:`, updateError.message);
                 }
@@ -421,15 +425,15 @@ export async function handleWebhookEvent(req, res) {
                     conversation_id: conversationId,
                     ...leadData
                   });
-
+ 
                 if (insertError) {
                   console.error(`[Webhook Background] Error inserting lead:`, insertError.message);
                 }
               }
-
+ 
               console.log(`[Webhook Background] ✅ Structured lead successfully saved/updated for ${customerPhone}`);
             } else {
-              console.log(`[Webhook Background] No booking/service intent found for conversation ${conversationId}`);
+              console.log(`[Webhook Background] No booking/service/support intent found for conversation ${conversationId}`);
             }
 
           } else {
