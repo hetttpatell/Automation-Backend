@@ -10,9 +10,32 @@ import metaRouter from './routes/meta.routes.js';
 const app = express();
 
 // Enable Cross-Origin Resource Sharing (CORS) globally to allow frontend connections
+const allowedOrigins = [
+  'https://automation-frontend-tjv3.vercel.app',
+  'https://automation-frontend-tjv3-git-main-hets-projects-bdd793fd.vercel.app'
+];
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-  credentials: true,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, postman, or internal server-to-server)
+    if (!origin) return callback(null, true);
+    
+    // Check if the origin matches our allowed list, is a Vercel subdomain/preview domain, or is localhost for local development
+    const isAllowed = allowedOrigins.includes(origin) || 
+                      origin.endsWith('.vercel.app') || 
+                      origin.startsWith('http://localhost:') || 
+                      origin.startsWith('https://localhost:') || 
+                      origin === 'http://localhost' || 
+                      origin === 'https://localhost';
+                      
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS policy'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  credentials: true
 }));
 
 // Parse incoming payloads containing JSON format, essential for Meta's POST notifications
