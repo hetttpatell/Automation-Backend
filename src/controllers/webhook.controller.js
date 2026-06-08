@@ -497,7 +497,7 @@ export const sendMessageFromHuman = async (req, res) => {
     console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
     // 1. Send manual message via WhatsApp Cloud API
     await whatsappService.sendWhatsAppMessage(
-      tenant.whatsapp_phone_number_id,
+      tenantId,
       customerPhone,
       messageText,
       tenant.whatsapp_access_token

@@ -17,6 +17,9 @@ async function resolveCredentials(tenantId) {
       const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
       const queryColumn = isUuid ? 'id' : 'whatsapp_phone_number_id';
 
+      const identifier = tenantId;
+      console.log("Looking up credentials for column/value:", identifier);
+
       const { data: tenant, error } = await supabase
         .from('tenants')
         .select('whatsapp_access_token, whatsapp_phone_number_id')
@@ -52,9 +55,10 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
     let resolvedToken = accessToken;
     let resolvedPhoneId = accessToken ? tenantId : null;
 
-    if (!resolvedToken) {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+    if (!resolvedToken || isUuid) {
       const creds = await resolveCredentials(tenantId);
-      resolvedToken = creds.resolvedToken;
+      resolvedToken = resolvedToken || creds.resolvedToken;
       resolvedPhoneId = creds.resolvedPhoneId;
     }
     const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
