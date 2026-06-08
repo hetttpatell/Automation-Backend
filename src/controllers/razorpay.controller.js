@@ -1,17 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import Razorpay from 'razorpay';
+import { env } from '../config/env.js';
 
 // ─── Supabase Admin Client ──────────────────────────────────────────
 const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  env.SUPABASE_URL || '',
+  env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
 // ─── Razorpay SDK Instance ──────────────────────────────────────────
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_dummy',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || 'dummy_secret',
+  key_id: env.RAZORPAY_KEY_ID || 'rzp_test_dummy',
+  key_secret: env.RAZORPAY_KEY_SECRET || 'dummy_secret',
 });
 
 // ─── Pack definitions for credit top-ups ────────────────────────────
@@ -23,9 +24,9 @@ const PACKS = {
 
 // ─── Plan ID mapping for subscriptions ──────────────────────────────
 const PLAN_MAPPING = {
-  starter: process.env.RAZORPAY_PLAN_STARTER || 'plan_starter_id',
-  growth: process.env.RAZORPAY_PLAN_GROWTH || 'plan_growth_id',
-  domination: process.env.RAZORPAY_PLAN_DOMINATION || 'plan_domination_id',
+  starter: env.RAZORPAY_PLAN_STARTER || 'plan_starter_id',
+  growth: env.RAZORPAY_PLAN_GROWTH || 'plan_growth_id',
+  domination: env.RAZORPAY_PLAN_DOMINATION || 'plan_domination_id',
 };
 
 // ─── Helper: Extract & verify Supabase user from Bearer token ───────
@@ -52,7 +53,7 @@ async function authenticateRequest(req) {
 export async function handleRazorpayWebhook(req, res) {
   const signature = req.headers['x-razorpay-signature'] || '';
   const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+  const secret = env.RAZORPAY_WEBHOOK_SECRET || '';
 
   try {
     if (!signature) {
@@ -280,10 +281,11 @@ export async function createSubscription(req, res) {
 
     // Create Razorpay Customer if it doesn't exist yet
     if (!customerId) {
-      console.log(`Creating Razorpay Customer for business: ${tenant.business_name}`);
+      const customerName = tenant.business_name || tenant.owner_email || user.email || 'Business Owner';
+      console.log(`Creating Razorpay Customer for business name: ${customerName}`);
       try {
         const customer = await razorpay.customers.create({
-          name: tenant.business_name,
+          name: customerName,
           email: tenant.owner_email || user.email || '',
         });
         customerId = customer.id;

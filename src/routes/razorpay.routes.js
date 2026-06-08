@@ -29,8 +29,9 @@ router.post(
 // Creates a Razorpay order for one-time credit top-up purchases. Requires Bearer token auth.
 router.post('/api/razorpay/create-order', createOrder);
 
-// Route: POST /api/razorpay/create-subscription
+// Route: POST /api/razorpay/create-subscription (and alias /api/payments/create-subscription)
 // Creates a Razorpay subscription for monthly plan upgrades. Requires Bearer token auth.
 router.post('/api/razorpay/create-subscription', createSubscription);
+router.post('/api/payments/create-subscription', createSubscription);
 
 export default router;
