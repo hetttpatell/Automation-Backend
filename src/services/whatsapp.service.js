@@ -1,5 +1,5 @@
 import { env } from '../config/env.js';
-import { supabase } from '../config/supabase.js';
+import { supabase as supabaseAdmin } from '../config/supabase.js';
 import axios from 'axios';
 
 /**
@@ -8,40 +8,27 @@ import axios from 'axios';
  * @param {string|null} tenantId - The tenant's ID.
  * @returns {Promise<{resolvedToken: string, resolvedPhoneId: string}>}
  */
-async function resolveCredentials(tenantId) {
-  let resolvedToken = process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || env.META_ACCESS_TOKEN;
-  let resolvedPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || env.WHATSAPP_PHONE_NUMBER_ID;
+async function resolveCredentials(identifier) {
+  const { data: tenant, error } = await supabaseAdmin
+    .from('tenants')
+    .select('whatsapp_access_token, whatsapp_phone_number_id')
+    .eq('id', identifier)
+    .single();
 
-  if (tenantId) {
-    try {
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
-      const queryColumn = isUuid ? 'id' : 'whatsapp_phone_number_id';
+  console.log("[SaaS Credential Fetch] DB Response:", { tenant, error });
 
-      const identifier = tenantId;
-      console.log("Looking up credentials for column/value:", identifier);
-
-      const { data: tenant, error } = await supabase
-        .from('tenants')
-        .select('whatsapp_access_token, whatsapp_phone_number_id')
-        .eq(queryColumn, tenantId)
-        .maybeSingle();
-
-      if (error) {
-        console.error(`[Supabase] Error fetching tenant credentials for ${tenantId}:`, error.message);
-      } else if (tenant) {
-        resolvedToken = tenant.whatsapp_access_token || resolvedToken;
-        resolvedPhoneId = tenant.whatsapp_phone_number_id || resolvedPhoneId;
-      }
-    } catch (err) {
-      console.error(`[Supabase] Exception fetching tenant credentials for ${tenantId}:`, err);
-    }
+  if (error) {
+    throw new Error(`Supabase query failed: ${error.message}`);
   }
 
-  if (!resolvedToken || !resolvedPhoneId) {
-    throw new Error("Meta credentials missing for this tenant and no developer fallback found.");
+  if (!tenant || !tenant.whatsapp_access_token || !tenant.whatsapp_phone_number_id) {
+    throw new Error("SaaS Error: Tenant found, but WhatsApp credentials (token/phone_id) are empty in the database. User needs to connect their WhatsApp account.");
   }
 
-  return { resolvedToken, resolvedPhoneId };
+  return {
+    accessToken: tenant.whatsapp_access_token,
+    phoneNumberId: tenant.whatsapp_phone_number_id
+  };
 }
 
 /**
@@ -58,8 +45,8 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
     if (!resolvedToken || isUuid) {
       const creds = await resolveCredentials(tenantId);
-      resolvedToken = resolvedToken || creds.resolvedToken;
-      resolvedPhoneId = creds.resolvedPhoneId;
+      resolvedToken = resolvedToken || creds.accessToken;
+      resolvedPhoneId = creds.phoneNumberId;
     }
     const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
     console.log(`Sending WhatsApp message to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
@@ -103,9 +90,9 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
  */
 export async function sendWhatsAppInteractiveMenu(tenantId, toPhone) {
   try {
-    const { resolvedToken, resolvedPhoneId } = await resolveCredentials(tenantId);
-    const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
-    console.log(`Sending interactive services menu to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
+    const { accessToken, phoneNumberId } = await resolveCredentials(tenantId);
+    const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+    console.log(`Sending interactive services menu to ${toPhone} using Phone Number ID: ${phoneNumberId}...`);
 
     const response = await axios.post(url, {
       messaging_product: 'whatsapp',
@@ -145,7 +132,7 @@ export async function sendWhatsAppInteractiveMenu(tenantId, toPhone) {
       }
     }, {
       headers: {
-        'Authorization': `Bearer ${resolvedToken}`,
+        'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
       }
     });
