@@ -11,8 +11,8 @@ const supabase = createClient(
 
 // ─── Razorpay SDK Instance ──────────────────────────────────────────
 const razorpay = new Razorpay({
-  key_id: env.RAZORPAY_KEY_ID || 'rzp_test_dummy',
-  key_secret: env.RAZORPAY_KEY_SECRET || 'dummy_secret',
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 // ─── Pack definitions for credit top-ups ────────────────────────────
@@ -24,9 +24,9 @@ const PACKS = {
 
 // ─── Plan ID mapping for subscriptions ──────────────────────────────
 const PLAN_MAPPING = {
-  starter: env.RAZORPAY_PLAN_STARTER || 'plan_starter_id',
-  growth: env.RAZORPAY_PLAN_GROWTH || 'plan_growth_id',
-  domination: env.RAZORPAY_PLAN_DOMINATION || 'plan_domination_id',
+  starter: process.env.RAZORPAY_PLAN_STARTER,
+  growth: process.env.RAZORPAY_PLAN_GROWTH,
+  domination: process.env.RAZORPAY_PLAN_DOMINATION,
 };
 
 // ─── Helper: Extract & verify Supabase user from Bearer token ───────
