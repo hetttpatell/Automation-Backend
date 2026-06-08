@@ -469,6 +469,7 @@ export async function handleWebhookEvent(req, res) {
  * and logs the new message trace in the database.
  */
 export async function sendMessageFromHuman(req, res) {
+  console.log("Payload received:", req.body);
   const { conversationId, customerPhone, messageText, tenantId } = req.body;
 
   if (!conversationId || !customerPhone || !messageText || !tenantId) {
@@ -509,7 +510,7 @@ export async function sendMessageFromHuman(req, res) {
 
     return res.status(200).json({ success: true, message: data });
   } catch (error) {
-    console.error('❌ Error sending manual human message:', error.message || error);
+    console.error("DETAILED SERVER ERROR:", error); // <-- THIS IS CRITICAL
     if (error.response && error.response.data) {
       console.error('Meta API Error Details:', JSON.stringify(error.response.data, null, 2));
     }
