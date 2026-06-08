@@ -479,11 +479,15 @@ export const sendMessageFromHuman = async (req, res) => {
       return res.status(400).json({ error: 'Missing required parameters.' });
     }
 
+    // Check if tenantId is a UUID or Phone Number ID
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+    const queryColumn = isUuid ? 'id' : 'whatsapp_phone_number_id';
+
     // Fetch tenant credentials from DB
     const { data: tenant, error: tenantError } = await supabase
       .from('tenants')
-      .select('whatsapp_phone_number_id, whatsapp_access_token')
-      .eq('id', tenantId)
+      .select('id, whatsapp_phone_number_id, whatsapp_access_token')
+      .eq(queryColumn, tenantId)
       .single();
 
     if (tenantError || !tenant) {
@@ -505,7 +509,7 @@ export const sendMessageFromHuman = async (req, res) => {
       .from('messages')
       .insert({
         conversation_id: conversationId,
-        tenant_id: tenantId,
+        tenant_id: tenant.id,
         sender: 'human',
         message_text: messageText
       })

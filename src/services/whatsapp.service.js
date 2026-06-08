@@ -14,10 +14,13 @@ async function resolveCredentials(tenantId) {
 
   if (tenantId) {
     try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+      const queryColumn = isUuid ? 'id' : 'whatsapp_phone_number_id';
+
       const { data: tenant, error } = await supabase
         .from('tenants')
         .select('whatsapp_access_token, whatsapp_phone_number_id')
-        .eq('id', tenantId)
+        .eq(queryColumn, tenantId)
         .maybeSingle();
 
       if (error) {
