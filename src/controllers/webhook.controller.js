@@ -468,15 +468,17 @@ export async function handleWebhookEvent(req, res) {
  * Handles manually sent human agent responses, triggers the WhatsApp message send,
  * and logs the new message trace in the database.
  */
-export async function sendMessageFromHuman(req, res) {
-  console.log("Payload received:", req.body);
-  const { conversationId, customerPhone, messageText, tenantId } = req.body;
-
-  if (!conversationId || !customerPhone || !messageText || !tenantId) {
-    return res.status(400).json({ error: 'Missing required parameters.' });
-  }
-
+export const sendMessageFromHuman = async (req, res) => {
   try {
+    console.log("DEBUG: Controller reached. Request body:", JSON.stringify(req.body, null, 2));
+
+    const body = req.body || req || {};
+    const { conversationId, customerPhone, messageText, tenantId } = body;
+
+    if (!conversationId || !customerPhone || !messageText || !tenantId) {
+      return res.status(400).json({ error: 'Missing required parameters.' });
+    }
+
     console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
     // 1. Send manual message via WhatsApp Cloud API
     await whatsappService.sendWhatsAppMessage(tenantId, customerPhone, messageText);
@@ -510,13 +512,13 @@ export async function sendMessageFromHuman(req, res) {
 
     return res.status(200).json({ success: true, message: data });
   } catch (error) {
-    console.error("DETAILED SERVER ERROR:", error); // <-- THIS IS CRITICAL
+    console.error("CRITICAL CONTROLLER ERROR:", error.stack);
     if (error.response && error.response.data) {
       console.error('Meta API Error Details:', JSON.stringify(error.response.data, null, 2));
     }
-    return res.status(500).json({ error: error.message || 'Internal server error' });
+    return res.status(500).json({ error: error.message, stack: error.stack });
   }
-}
+};
 
 /*
 =========================================
