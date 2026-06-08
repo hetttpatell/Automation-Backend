@@ -37,8 +37,8 @@ export async function exchangeToken(req, res) {
       return res.status(401).json({ error: 'Unauthorized user session.' });
     }
 
-    const { accessToken } = req.body;
-    if (!accessToken) {
+    const { accessToken: shortLivedToken } = req.body;
+    if (!shortLivedToken) {
       return res.status(400).json({ error: 'Missing client short-lived accessToken in request body.' });
     }
 
@@ -64,7 +64,7 @@ export async function exchangeToken(req, res) {
           grant_type: 'fb_exchange_token',
           client_id: env.META_APP_ID,
           client_secret: env.META_APP_SECRET,
-          fb_exchange_token: accessToken
+          fb_exchange_token: shortLivedToken
         }
       });
     } catch (apiErr) {
@@ -75,8 +75,8 @@ export async function exchangeToken(req, res) {
       });
     }
 
-    const longLivedToken = longLivedTokenResponse.data.access_token;
-    if (!longLivedToken) {
+    const accessToken = longLivedTokenResponse.data.access_token;
+    if (!accessToken) {
       console.error('[Meta OAuth] Long-lived token missing from response payload:', longLivedTokenResponse.data);
       return res.status(500).json({ error: 'Long-lived token missing from Meta API response.' });
     }
@@ -93,7 +93,7 @@ export async function exchangeToken(req, res) {
     try {
       const debugResponse = await axios.get('https://graph.facebook.com/v19.0/debug_token', {
         params: {
-          input_token: longLivedToken,
+          input_token: accessToken,
           access_token: `${env.META_APP_ID}|${env.META_APP_SECRET}`
         }
       });
@@ -149,7 +149,7 @@ export async function exchangeToken(req, res) {
     let phoneResponse;
     try {
       phoneResponse = await axios.get(`https://graph.facebook.com/v19.0/${wabaId}/phone_numbers`, {
-        headers: { Authorization: `Bearer ${longLivedToken}` }
+        headers: { Authorization: `Bearer ${accessToken}` }
       });
     } catch (phoneErr) {
       console.error(`[Meta OAuth] Failed to fetch Phone Numbers for WABA ${wabaId}:`, phoneErr.response?.data || phoneErr.message);
@@ -165,16 +165,16 @@ export async function exchangeToken(req, res) {
       return res.status(400).json({ error: 'No phone numbers found in the associated WhatsApp Business Account.' });
     }
 
-    const phoneNumberId = phoneList[0].id;
-    console.log(`[Meta OAuth] Selected Phone Number ID: ${phoneNumberId}`);
+    const phoneId = phoneList[0].id;
+    console.log(`[Meta OAuth] Selected Phone Number ID: ${phoneId}`);
 
     // ── Step D: Persist to Supabase ──
-    console.log(`[Meta OAuth] Persisting credentials to Supabase for Tenant ID: ${tenant.id}`);
+    console.log("Saving Meta Credentials to DB:", { phoneId, wabaId, hasAccessToken: !!accessToken });
     const { error: updateError } = await supabase
       .from('tenants')
       .update({
-        whatsapp_access_token: longLivedToken,
-        whatsapp_phone_number_id: phoneNumberId,
+        whatsapp_access_token: accessToken,
+        whatsapp_phone_number_id: phoneId,
         waba_id: wabaId,
         whatsapp_business_account_id: wabaId
       })
@@ -191,7 +191,7 @@ export async function exchangeToken(req, res) {
       message: 'WhatsApp Business account connected successfully.',
       data: {
         wabaId,
-        phoneNumberId
+        phoneNumberId: phoneId
       }
     });
 
