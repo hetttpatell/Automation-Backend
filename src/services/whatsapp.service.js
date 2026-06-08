@@ -44,9 +44,16 @@ async function resolveCredentials(tenantId) {
  * @param {string} toPhone - The recipient's phone number.
  * @param {string} messageText - The message body.
  */
-export async function sendWhatsAppMessage(tenantId, toPhone, messageText) {
+export async function sendWhatsAppMessage(tenantId, toPhone, messageText, accessToken = null) {
   try {
-    const { resolvedToken, resolvedPhoneId } = await resolveCredentials(tenantId);
+    let resolvedToken = accessToken;
+    let resolvedPhoneId = accessToken ? tenantId : null;
+
+    if (!resolvedToken) {
+      const creds = await resolveCredentials(tenantId);
+      resolvedToken = creds.resolvedToken;
+      resolvedPhoneId = creds.resolvedPhoneId;
+    }
     const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
     console.log(`Sending WhatsApp message to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
 

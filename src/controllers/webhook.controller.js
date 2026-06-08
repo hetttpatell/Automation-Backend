@@ -479,9 +479,25 @@ export const sendMessageFromHuman = async (req, res) => {
       return res.status(400).json({ error: 'Missing required parameters.' });
     }
 
+    // Fetch tenant credentials from DB
+    const { data: tenant, error: tenantError } = await supabase
+      .from('tenants')
+      .select('whatsapp_phone_number_id, whatsapp_access_token')
+      .eq('id', tenantId)
+      .single();
+
+    if (tenantError || !tenant) {
+      throw new Error("Could not find tenant credentials in database.");
+    }
+
     console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
     // 1. Send manual message via WhatsApp Cloud API
-    await whatsappService.sendWhatsAppMessage(tenantId, customerPhone, messageText);
+    await whatsappService.sendWhatsAppMessage(
+      tenant.whatsapp_phone_number_id,
+      customerPhone,
+      messageText,
+      tenant.whatsapp_access_token
+    );
 
     console.log(`[Supabase] Saving human message for conversation ${conversationId}...`);
     // 2. Persist the human's response in the Supabase messages table
