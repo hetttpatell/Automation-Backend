@@ -3,7 +3,8 @@ import express from 'express';
 import {
   handleRazorpayWebhook,
   createOrder,
-  createSubscription
+  createSubscription,
+  verifyPayment
 } from '../controllers/razorpay.controller.js';
 
 const router = Router();
@@ -33,5 +34,9 @@ router.post('/api/razorpay/create-order', createOrder);
 // Creates a Razorpay subscription for monthly plan upgrades. Requires Bearer token auth.
 router.post('/api/razorpay/create-subscription', createSubscription);
 router.post('/api/payments/create-subscription', createSubscription);
+
+// Route: POST /api/razorpay/verify
+// Cryptographically verifies payment signatures and fulfills the purchase.
+router.post('/api/razorpay/verify', verifyPayment);
 
 export default router;

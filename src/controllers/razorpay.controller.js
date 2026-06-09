@@ -95,7 +95,7 @@ export async function handleRazorpayWebhook(req, res) {
       if (notesTier === 'starter') {
         tier = 'starter';
         baseCredits = 500;
-      } else if (notesTier === 'growth') {
+      } else if (notesTier === 'growth' || notesTier === 'pro') {
         tier = 'growth';
         baseCredits = 2500;
       } else if (notesTier === 'domination') {
@@ -107,7 +107,7 @@ export async function handleRazorpayWebhook(req, res) {
         if (planId?.includes('starter')) {
           tier = 'starter';
           baseCredits = 500;
-        } else if (planId?.includes('growth')) {
+        } else if (planId?.includes('growth') || planId?.includes('pro') || planId === process.env.RAZORPAY_PLAN_GROWTH) {
           tier = 'growth';
           baseCredits = 2500;
         } else if (planId?.includes('domination')) {
@@ -261,9 +261,28 @@ export async function createSubscription(req, res) {
       return res.status(401).json({ error: 'Unauthorized user session.' });
     }
 
-    const { planId } = req.body;
-    if (!planId || !PLAN_MAPPING[planId]) {
-      return res.status(400).json({ error: 'Invalid planId provided.' });
+    const planType = req.body.planType || req.body.tier || req.body.planId;
+    
+    let planId;
+    const normalizedPlanType = planType ? planType.toLowerCase() : '';
+    
+    switch (normalizedPlanType) {
+        case 'starter':
+            planId = process.env.RAZORPAY_PLAN_STARTER;
+            break;
+        case 'pro':
+        case 'growth':
+            planId = process.env.RAZORPAY_PLAN_GROWTH;
+            break;
+        case 'domination':
+            planId = process.env.RAZORPAY_PLAN_DOMINATION;
+            break;
+        default:
+            return res.status(400).json({ error: "Invalid plan type specified: " + planType });
+    }
+
+    if (!planId) {
+        return res.status(500).json({ error: `Razorpay Plan ID for ${planType} is not configured on the server.` });
     }
 
     // Fetch user's tenant
@@ -302,22 +321,234 @@ export async function createSubscription(req, res) {
     }
 
     // Create Subscription in Razorpay
-    const razorpayPlanId = PLAN_MAPPING[planId];
-    console.log(`Creating Razorpay Subscription for plan: ${planId} (${razorpayPlanId})`);
+    console.log(`Creating Razorpay Subscription for plan: ${planType} (${planId})`);
 
     const subscription = await razorpay.subscriptions.create({
-      plan_id: razorpayPlanId,
+      plan_id: planId,
       total_count: 12,
       customer_notify: 1,
       notes: {
         tenant_id: tenant.id,
-        subscription_tier: planId,
+        subscription_tier: (normalizedPlanType === 'pro' || normalizedPlanType === 'growth') ? 'growth' : normalizedPlanType,
       },
     });
 
     return res.status(200).json(subscription);
   } catch (error) {
     console.error('Subscription create error:', error);
+    return res.status(500).json({ error: error.message || 'Internal Server Error' });
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// POST /api/razorpay/verify
+// Cryptographically verifies payment signature & fulfills DB record in Supabase
+// ═════════════════════════════════════════════════════════════════════
+export async function verifyPayment(req, res) {
+  try {
+    const {
+      razorpay_payment_id,
+      razorpay_signature,
+      razorpay_subscription_id,
+      razorpay_order_id,
+      planType,
+      userId
+    } = req.body;
+
+    // 1. Signature Verification
+    const secret = process.env.RAZORPAY_KEY_SECRET;
+    let bodyToSign = "";
+
+    if (razorpay_subscription_id) {
+      bodyToSign = razorpay_payment_id + '|' + razorpay_subscription_id;
+    } else if (razorpay_order_id) {
+      bodyToSign = razorpay_order_id + '|' + razorpay_payment_id;
+    } else {
+      return res.status(400).json({ error: "Missing subscription or order ID" });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(bodyToSign)
+      .digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+      console.error('[Razorpay Verification] Cryptographic verification failed.');
+      return res.status(400).json({ error: "Cryptographic verification failed. Invalid signature." });
+    }
+
+    console.log('[Razorpay Verification] Signature verified successfully.');
+
+    // 2. Resolve Tenant ID
+    let tenantId = userId;
+    let ownerEmail = null;
+
+    // Try to authenticate via Bearer token first
+    const { user, error: authError } = await authenticateRequest(req);
+    if (!authError && user && user.email) {
+      ownerEmail = user.email;
+    }
+
+    let tenant = null;
+    if (ownerEmail) {
+      const { data, error } = await supabase
+        .from('tenants')
+        .select('id, subscription_tier, ai_credits_balance, ai_credits_limit')
+        .eq('owner_email', ownerEmail)
+        .single();
+      if (!error && data) {
+        tenant = data;
+        tenantId = data.id;
+      }
+    } else if (tenantId) {
+      const { data, error } = await supabase
+        .from('tenants')
+        .select('id, subscription_tier, ai_credits_balance, ai_credits_limit')
+        .eq('id', tenantId)
+        .single();
+      if (!error && data) {
+        tenant = data;
+      }
+    }
+
+    if (!tenant) {
+      return res.status(404).json({ error: 'Tenant record not found.' });
+    }
+
+    // 3. Fulfill purchase dynamically
+    if (razorpay_subscription_id) {
+      // Monthly Subscription upgrade
+      const normalizedPlanType = planType ? planType.toLowerCase() : '';
+      let tier = 'free';
+      let baseCredits = 50;
+
+      if (normalizedPlanType === 'starter') {
+        tier = 'starter';
+        baseCredits = 500;
+      } else if (normalizedPlanType === 'growth' || normalizedPlanType === 'pro') {
+        tier = 'growth';
+        baseCredits = 2500;
+      } else if (normalizedPlanType === 'domination') {
+        tier = 'domination';
+        baseCredits = 10000;
+      } else {
+        // Retrieve subscription details from Razorpay if planType is unspecified
+        try {
+          const subscription = await razorpay.subscriptions.fetch(razorpay_subscription_id);
+          const planId = subscription.plan_id;
+          if (planId?.includes('starter')) {
+            tier = 'starter';
+            baseCredits = 500;
+          } else if (planId?.includes('growth') || planId?.includes('pro') || planId === process.env.RAZORPAY_PLAN_GROWTH) {
+            tier = 'growth';
+            baseCredits = 2500;
+          } else if (planId?.includes('domination')) {
+            tier = 'domination';
+            baseCredits = 10000;
+          }
+        } catch (fetchErr) {
+          console.error('[Razorpay Verification] Failed to fetch subscription details from Razorpay:', fetchErr);
+        }
+      }
+
+      console.log(`[Razorpay Verification] Updating tenant ${tenantId} to Subscription Tier: ${tier}, Credits: ${baseCredits}`);
+
+      const { error: updateError } = await supabase
+        .from('tenants')
+        .update({
+          subscription_tier: tier,
+          subscription_status: 'active',
+          ai_credits_balance: baseCredits,
+          ai_credits_limit: baseCredits,
+          razorpay_subscription_id: razorpay_subscription_id,
+        })
+        .eq('id', tenantId);
+
+      if (updateError) {
+        console.error(`[Razorpay Verification] Supabase update failed:`, updateError.message);
+        return res.status(500).json({ error: 'Database update failed' });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Subscription successfully verified and upgraded to ${tier}.`,
+        subscription_tier: tier,
+        ai_credits_balance: baseCredits,
+      });
+
+    } else if (razorpay_order_id) {
+      // One-Time Credit Top-Up
+      let creditAmount = 0;
+      try {
+        const orderDetails = await razorpay.orders.fetch(razorpay_order_id);
+        const notes = orderDetails.notes || {};
+        creditAmount = parseInt(notes.credit_amount || '0', 10);
+      } catch (fetchErr) {
+        console.warn('[Razorpay Verification] Failed to fetch order details from Razorpay, falling back to body params.', fetchErr);
+      }
+
+      // Fallback to packId / planType mapping
+      if (creditAmount === 0) {
+        const packId = planType; // Frontend passes packId
+        if (packId && PACKS[packId]) {
+          creditAmount = PACKS[packId].credits;
+        }
+      }
+
+      if (creditAmount <= 0) {
+        return res.status(400).json({ error: 'Could not determine credit amount for top-up.' });
+      }
+
+      console.log(`[Razorpay Verification] Incrementing credits for tenant ${tenantId} by ${creditAmount}`);
+
+      const { data: newBalance, error: rpcError } = await supabase.rpc('increment_tenant_credits', {
+        tenant_id: tenantId,
+        amount: creditAmount,
+      });
+
+      let finalBalance = newBalance;
+
+      if (rpcError) {
+        console.warn('[Razorpay Verification] RPC increment failed, falling back to direct update.', rpcError.message);
+        
+        // Direct mathematical update fallback
+        const { data: tenantData } = await supabase
+          .from('tenants')
+          .select('ai_credits_balance, ai_credits_limit')
+          .eq('id', tenantId)
+          .single();
+
+        if (tenantData) {
+          const currentBalance = tenantData.ai_credits_balance || 0;
+          const currentLimit = tenantData.ai_credits_limit || 0;
+          finalBalance = currentBalance + creditAmount;
+
+          const { error: fallbackError } = await supabase
+            .from('tenants')
+            .update({
+              ai_credits_balance: finalBalance,
+              ai_credits_limit: currentLimit + creditAmount,
+            })
+            .eq('id', tenantId);
+
+          if (fallbackError) {
+            console.error('[Razorpay Verification] Fallback update failed:', fallbackError.message);
+            return res.status(500).json({ error: 'Database update failed' });
+          }
+        } else {
+          return res.status(404).json({ error: 'Tenant record not found for update' });
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Credits successfully verified and topped up by ${creditAmount}.`,
+        ai_credits_balance: finalBalance,
+      });
+    }
+
+  } catch (error) {
+    console.error('[Razorpay Verification Error]:', error);
     return res.status(500).json({ error: error.message || 'Internal Server Error' });
   }
 }
