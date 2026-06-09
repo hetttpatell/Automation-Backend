@@ -49,7 +49,9 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
       resolvedPhoneId = creds.phoneNumberId;
     }
     const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
-    console.log(`Sending WhatsApp message to ${toPhone} using Phone Number ID: ${resolvedPhoneId}...`);
+    
+    const cleanPhone = String(toPhone).replace(/\D/g, '');
+    console.log(`Sending WhatsApp message to ${cleanPhone} (original: ${toPhone}) using Phone Number ID: ${resolvedPhoneId}...`);
 
     let sanitizedText = messageText || '';
     if (typeof sanitizedText === 'string') {
@@ -62,7 +64,7 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
     const response = await axios.post(url, {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: toPhone,
+      to: cleanPhone,
       type: 'text',
       text: {
         preview_url: false,
@@ -75,10 +77,15 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
       }
     });
 
-    console.log(`Message successfully sent to ${toPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
+    console.log(`Message successfully sent to ${cleanPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
     return true;
   } catch (err) {
-    console.error(`Axios/Credential error in sendWhatsAppMessage for ${toPhone}:`, err.response?.data || err.message || err);
+    console.error(`Axios/Credential error in sendWhatsAppMessage for ${toPhone}:`, err.message || err);
+    if (err.response) {
+      console.error("Meta API Response Error Data:", JSON.stringify(err.response.data, null, 2));
+      console.error("Meta API Response Status:", err.response.status);
+      console.error("Meta API Response Headers:", err.response.headers);
+    }
     throw err;
   }
 }
@@ -92,12 +99,14 @@ export async function sendWhatsAppInteractiveMenu(tenantId, toPhone) {
   try {
     const { accessToken, phoneNumberId } = await resolveCredentials(tenantId);
     const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-    console.log(`Sending interactive services menu to ${toPhone} using Phone Number ID: ${phoneNumberId}...`);
+    
+    const cleanPhone = String(toPhone).replace(/\D/g, '');
+    console.log(`Sending interactive services menu to ${cleanPhone} (original: ${toPhone}) using Phone Number ID: ${phoneNumberId}...`);
 
     const response = await axios.post(url, {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: toPhone,
+      to: cleanPhone,
       type: 'interactive',
       interactive: {
         type: 'button',
@@ -137,10 +146,15 @@ export async function sendWhatsAppInteractiveMenu(tenantId, toPhone) {
       }
     });
 
-    console.log(`Interactive menu successfully sent to ${toPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
+    console.log(`Interactive menu successfully sent to ${cleanPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
     return true;
   } catch (err) {
-    console.error(`Axios/Credential error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err.response?.data || err.message || err);
+    console.error(`Axios/Credential error in sendWhatsAppInteractiveMenu for ${toPhone}:`, err.message || err);
+    if (err.response) {
+      console.error("Meta API Response Error Data:", JSON.stringify(err.response.data, null, 2));
+      console.error("Meta API Response Status:", err.response.status);
+      console.error("Meta API Response Headers:", err.response.headers);
+    }
     throw err;
   }
 }

@@ -83,64 +83,52 @@ export async function exchangeToken(req, res) {
 
     console.log('[Meta OAuth] Token exchanged successfully. Fetching connected accounts...');
 
-    // ── Step C: Discover WABA ID via Debug Token ──
-    // With only whatsapp_business_management + whatsapp_business_messaging scopes,
-    // we cannot call /me/businesses or /me/whatsapp_business_accounts (those need
-    // the general business_management scope). Instead, use the Debug Token endpoint
-    // which returns `granular_scopes` containing the WABA IDs the token was granted.
+    // ── Step C: Discover WABA ID via Client WhatsApp Business Accounts Edge ──
+    const longLivedToken = accessToken;
     let wabaId = null;
 
     try {
-      const debugResponse = await axios.get('https://graph.facebook.com/v19.0/debug_token', {
-        params: {
-          input_token: accessToken,
-          access_token: `${env.META_APP_ID}|${env.META_APP_SECRET}`
-        }
-      });
+      // Fetch the shared accounts explicitly authorized by the granular picker
+      const wabaUrl = `https://graph.facebook.com/v19.0/me/client_whatsapp_business_accounts?access_token=${longLivedToken}`;
+      const wabaResponse = await fetch(wabaUrl);
+      const wabaData = await wabaResponse.json();
 
-      console.log('[Meta OAuth] Debug token response:', JSON.stringify(debugResponse.data, null, 2));
+      console.log('[Meta OAuth] Client WABAs response:', JSON.stringify(wabaData, null, 2));
 
-      const tokenData = debugResponse.data?.data;
-      if (!tokenData) {
-        console.error('[Meta OAuth] Debug token returned no data payload.');
-        return res.status(400).json({ error: 'Could not inspect the access token. Debug endpoint returned no data.' });
+      if (wabaData && wabaData.data && wabaData.data.length > 0) {
+          wabaId = wabaData.data[0].id; 
+      } else {
+          // Secondary Fallback: Try the debug token inspect edge
+          console.log("[Meta OAuth] Primary WABA array empty. Triggering debug_token metadata lookup...");
+          
+          const debugUrl = `https://graph.facebook.com/debug_token?input_token=${longLivedToken}&access_token=${process.env.META_APP_ID || env.META_APP_ID}|${process.env.META_APP_SECRET || env.META_APP_SECRET}`;
+          const debugRes = await fetch(debugUrl);
+          const debugData = await debugRes.json();
+
+          // Meta often returns granularity data inside the debug metadata structure
+          if (debugData && debugData.data && debugData.data.granular_scopes) {
+              const whatsappScope = debugData.data.granular_scopes.find(s => s.scope === 'whatsapp_business_management');
+              if (whatsappScope && whatsappScope.target_ids && whatsappScope.target_ids.length > 0) {
+                  // Found the WABA ID hidden inside the target_ids metadata!
+                  wabaId = whatsappScope.target_ids[0];
+                  console.log(`[Meta OAuth] Successfully extracted WABA ID from granular scopes target_ids: ${wabaId}`);
+              }
+          }
       }
-
-      // Extract WABA IDs from granular_scopes
-      // The whatsapp_business_management scope entry contains the WABA IDs the token can access
-      const granularScopes = tokenData.granular_scopes || [];
-      const wabmScope = granularScopes.find(
-        (s) => s.scope === 'whatsapp_business_management'
-      );
-
-      if (wabmScope && wabmScope.target_ids && wabmScope.target_ids.length > 0) {
-        wabaId = wabmScope.target_ids[0];
-        console.log(`[Meta OAuth] Discovered WABA ID from granular_scopes: ${wabaId}`);
-      }
-
-      // Fallback: also check whatsapp_business_messaging scope
-      if (!wabaId) {
-        const wbmScope = granularScopes.find(
-          (s) => s.scope === 'whatsapp_business_messaging'
-        );
-        if (wbmScope && wbmScope.target_ids && wbmScope.target_ids.length > 0) {
-          wabaId = wbmScope.target_ids[0];
-          console.log(`[Meta OAuth] Discovered WABA ID from whatsapp_business_messaging scope: ${wabaId}`);
-        }
-      }
-    } catch (debugErr) {
-      console.error('[Meta OAuth] Debug token inspection failed:', debugErr.response?.data || debugErr.message);
+    } catch (apiErr) {
+      console.error('[Meta OAuth] Failed during WABA discovery process:', apiErr.message);
       return res.status(400).json({
-        error: 'Failed to inspect access token via Meta Debug Token endpoint.',
-        details: debugErr.response?.data || debugErr.message
+        error: 'Failed to retrieve WhatsApp Business Accounts associated with the user token.',
+        details: apiErr.message
       });
     }
 
+    // Ultimate check and exit guard
     if (!wabaId) {
-      console.error('[Meta OAuth] No WABA ID found in granular_scopes. The user may not have shared a WhatsApp Business Account during login.');
-      return res.status(400).json({
-        error: 'No WhatsApp Business Account (WABA) was shared during the Meta login flow. Please re-connect and ensure you select a WhatsApp Business Account.'
-      });
+        console.error("[Meta OAuth Error] Failed to extract WABA ID from both primary data and granular debug scopes.");
+        return res.status(400).json({ 
+            error: "No WhatsApp Business Account (WABA) was shared during the Meta login flow. Please re-connect and ensure you select a WhatsApp Business Account." 
+        });
     }
 
     console.log(`[Meta OAuth] Using WABA ID: ${wabaId}. Fetching Phone Numbers...`);
