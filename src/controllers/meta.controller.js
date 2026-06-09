@@ -37,19 +37,36 @@ export async function exchangeToken(req, res) {
       return res.status(401).json({ error: 'Unauthorized user session.' });
     }
 
-    // Ensure you are pulling the code from the request body correctly
-    const receivedCode = req.body.token || req.body.code; 
+    // Fetch tenant details for the authenticated user
+    const { data: tenant, error: tenantError } = await supabase
+      .from('tenants')
+      .select('id')
+      .eq('owner_email', user.email)
+      .single();
 
-    console.log("[Meta OAuth] Received Auth Code from frontend. Exchanging for Access Token...");
+    if (tenantError || !tenant) {
+      console.error('[Meta Auth] Tenant profile not found for user:', user.email);
+      return res.status(404).json({ error: 'Tenant profile not found.' });
+    }
+
+    // Extract both the code and the redirect URI sent from the frontend
+    const receivedCode = req.body.token || req.body.code; 
+    const redirectUri = req.body.redirectUri;
+
+    console.log(`[Meta OAuth] Exchanging code using Redirect URI: ${redirectUri}`);
 
     if (!process.env.META_APP_ID || !process.env.META_APP_SECRET) {
         console.error("[Meta OAuth FATAL] Missing META_APP_ID or META_APP_SECRET.");
         return res.status(500).json({ error: "Server configuration missing Meta App credentials." });
     }
 
-    // Meta's Code Exchange Endpoint
-    // CRITICAL: The &redirect_uri= parameter must be present at the end and left completely blank to match the JS SDK's internal signature.
-    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=`;
+    if (!redirectUri) {
+        console.error("[Meta OAuth ERROR] Frontend did not provide a redirectUri.");
+        return res.status(400).json({ error: "Missing redirect_uri." });
+    }
+
+    // Meta's Code Exchange Endpoint with the exact frontend URL injected
+    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
     try {
         const tokenRes = await fetch(tokenUrl);
@@ -60,7 +77,6 @@ export async function exchangeToken(req, res) {
             return res.status(400).json({ error: "Failed to exchange authorization code with Meta API." });
         }
 
-        // Capture the newly generated User Access Token
         const longLivedToken = tokenData.access_token;
         const accessToken = longLivedToken;
         console.log("[Meta OAuth] Code exchanged successfully! Extracted User Access Token.");
