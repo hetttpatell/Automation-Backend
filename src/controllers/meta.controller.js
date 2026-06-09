@@ -48,7 +48,8 @@ export async function exchangeToken(req, res) {
     }
 
     // Meta's Code Exchange Endpoint
-    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}`;
+    // CRITICAL: The &redirect_uri= parameter must be present at the end and left completely blank to match the JS SDK's internal signature.
+    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=`;
 
     try {
         const tokenRes = await fetch(tokenUrl);
