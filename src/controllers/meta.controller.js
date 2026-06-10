@@ -51,15 +51,7 @@ export async function exchangeToken(req, res) {
 
     // Extract both the code and the explicit redirect URI from the frontend
     const receivedCode = req.body.token || req.body.code; 
-    let redirectUri = req.body.redirectUri || req.body.redirect_uri;
-
-    // If the login was initiated via the JS SDK popup flow, the SDK sets the OAuth dialog's 
-    // redirect_uri to Facebook's internal cross-domain arbiter URL. We must use the exact
-    // same redirect_uri in the backend exchange to prevent OAuthException (subcode 36008).
-    if (redirectUri && (redirectUri.includes('vercel.app') || redirectUri.includes('localhost') || redirectUri.includes('render.com') || redirectUri.includes('settings'))) {
-        console.log(`[Meta OAuth] Overriding frontend redirectUri '${redirectUri}' with JS SDK xd_arbiter URL`);
-        redirectUri = 'https://staticxx.facebook.com/x/connect/xd_arbiter/?version=46';
-    }
+    const redirectUri = req.body.redirectUri || req.body.redirect_uri;
 
     console.log(`[Meta OAuth] Exchanging code using explicit JS SDK flow`);
 
