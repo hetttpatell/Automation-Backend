@@ -49,7 +49,7 @@ export async function exchangeToken(req, res) {
       return res.status(404).json({ error: 'Tenant profile not found.' });
     }
 
-    // Extract both the code and the redirect URI sent from the frontend
+    // Extract both the code and the explicit redirect URI from the frontend
     const receivedCode = req.body.token || req.body.code; 
     const redirectUri = req.body.redirectUri;
 
@@ -65,7 +65,7 @@ export async function exchangeToken(req, res) {
         return res.status(400).json({ error: "Missing redirect_uri." });
     }
 
-    // Meta's Code Exchange Endpoint with the exact frontend URL injected
+    // CRITICAL: The explicitly URL-encoded redirect_uri is back in the fetch string
     const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
     try {
