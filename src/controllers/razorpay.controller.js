@@ -301,13 +301,16 @@ export async function createSubscription(req, res) {
     // Create Razorpay Customer if it doesn't exist yet
     if (!customerId) {
       const customerName = tenant.business_name || tenant.owner_email || user.email || 'Business Owner';
+      const customerEmail = tenant.owner_email || user.email || '';
       console.log(`Creating Razorpay Customer for business name: ${customerName}`);
       try {
-        const customer = await razorpay.customers.create({
+        // Attempt to create a new customer
+        const newCustomer = await razorpay.customers.create({
           name: customerName,
-          email: tenant.owner_email || user.email || '',
+          email: customerEmail,
         });
-        customerId = customer.id;
+        customerId = newCustomer.id;
+        console.log(`[Razorpay] Created new customer: ${customerId}`);
 
         // Save Customer ID in Supabase
         await supabase
@@ -315,8 +318,31 @@ export async function createSubscription(req, res) {
           .update({ razorpay_customer_id: customerId })
           .eq('id', tenant.id);
       } catch (err) {
-        console.error('Error creating Razorpay Customer:', err);
-        return res.status(500).json({ error: 'Failed to create payment customer context.' });
+        // Check if the error is specifically because the customer already exists
+        if (err.error && err.error.description === 'Customer already exists for the merchant') {
+          console.log("[Razorpay] Customer already exists. Fetching existing customer profile...");
+          
+          // Fetch the existing customer using their email
+          const existingCustomers = await razorpay.customers.all({ email: customerEmail });
+          
+          if (existingCustomers && existingCustomers.items && existingCustomers.items.length > 0) {
+            customerId = existingCustomers.items[0].id;
+            console.log(`[Razorpay] Successfully retrieved existing customer: ${customerId}`);
+
+            // Save Customer ID in Supabase
+            await supabase
+              .from('tenants')
+              .update({ razorpay_customer_id: customerId })
+              .eq('id', tenant.id);
+          } else {
+            console.error("[Razorpay FATAL] Customer exists but could not be fetched by email.");
+            return res.status(500).json({ error: "Failed to retrieve existing payment profile." });
+          }
+        } else {
+          // If it's a different Razorpay error, log it and fail
+          console.error("[Razorpay ERROR] Failed to create customer:", JSON.stringify(err, null, 2));
+          return res.status(500).json({ error: 'Failed to create payment customer context.' });
+        }
       }
     }
 
