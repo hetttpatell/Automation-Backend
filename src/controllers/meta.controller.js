@@ -49,24 +49,17 @@ export async function exchangeToken(req, res) {
       return res.status(404).json({ error: 'Tenant profile not found.' });
     }
 
-    // Extract both the code and the explicit redirect URI from the frontend
     const receivedCode = req.body.token || req.body.code; 
-    const redirectUri = req.body.redirectUri;
 
-    console.log(`[Meta OAuth] Exchanging code using Redirect URI: ${redirectUri}`);
+    console.log("[Meta OAuth] Exchanging code utilizing JS SDK empty redirect_uri proxy...");
 
     if (!process.env.META_APP_ID || !process.env.META_APP_SECRET) {
         console.error("[Meta OAuth FATAL] Missing META_APP_ID or META_APP_SECRET.");
         return res.status(500).json({ error: "Server configuration missing Meta App credentials." });
     }
 
-    if (!redirectUri) {
-        console.error("[Meta OAuth ERROR] Frontend did not provide a redirectUri.");
-        return res.status(400).json({ error: "Missing redirect_uri." });
-    }
-
-    // CRITICAL: The explicitly URL-encoded redirect_uri is back in the fetch string
-    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    // CRITICAL: &redirect_uri= must be present but completely empty to match the JS SDK signature
+    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=`;
 
     try {
         const tokenRes = await fetch(tokenUrl);
