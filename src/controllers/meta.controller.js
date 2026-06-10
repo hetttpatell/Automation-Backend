@@ -51,6 +51,7 @@ export async function exchangeToken(req, res) {
 
     // Extract both the code and the explicit redirect URI from the frontend
     const receivedCode = req.body.token || req.body.code; 
+    const redirectUri = req.body.redirectUri || req.body.redirect_uri;
 
     console.log(`[Meta OAuth] Exchanging code using explicit JS SDK flow`);
 
@@ -59,11 +60,14 @@ export async function exchangeToken(req, res) {
         return res.status(500).json({ error: "Server configuration missing Meta App credentials." });
     }
 
-    // CRITICAL: No redirect_uri parameter should be included here because the authorization code 
-    // was generated via the JS SDK popup flow (which utilizes postMessage cross-domain bridging 
-    // rather than direct browser redirect). Including a redirect_uri in this case causes Meta to
-    // return OAuthException (code 100, subcode 36008) "redirect_uri is not identical".
-    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}`;
+    // Build the exchange URL, appending redirect_uri if supplied by the frontend
+    let tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}`;
+    if (redirectUri) {
+        tokenUrl += `&redirect_uri=${encodeURIComponent(redirectUri)}`;
+        console.log(`[Meta OAuth] Appending redirect_uri to exchange request: ${redirectUri}`);
+    } else {
+        console.log(`[Meta OAuth] No redirect_uri supplied in exchange request`);
+    }
 
     try {
         const tokenRes = await fetch(tokenUrl);
