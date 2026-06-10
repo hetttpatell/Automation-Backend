@@ -49,24 +49,21 @@ export async function exchangeToken(req, res) {
       return res.status(404).json({ error: 'Tenant profile not found.' });
     }
 
-    // Extract the code and the explicit frontend URL
+    // Extract both the code and the explicit redirect URI from the frontend
     const receivedCode = req.body.token || req.body.code; 
-    const redirectUri = req.body.redirectUri;
 
-    console.log(`[Meta OAuth] Exchanging code using Explicit Redirect URI: ${redirectUri}`);
+    console.log(`[Meta OAuth] Exchanging code using explicit JS SDK flow`);
 
     if (!process.env.META_APP_ID || !process.env.META_APP_SECRET) {
         console.error("[Meta OAuth FATAL] Missing META_APP_ID or META_APP_SECRET.");
         return res.status(500).json({ error: "Server configuration missing Meta App credentials." });
     }
 
-    if (!redirectUri) {
-        console.error("[Meta OAuth ERROR] Frontend did not provide a redirectUri.");
-        return res.status(400).json({ error: "Missing redirect_uri." });
-    }
-
-    // CRITICAL: The explicitly URL-encoded redirectUri must be appended here
-    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    // CRITICAL: No redirect_uri parameter should be included here because the authorization code 
+    // was generated via the JS SDK popup flow (which utilizes postMessage cross-domain bridging 
+    // rather than direct browser redirect). Including a redirect_uri in this case causes Meta to
+    // return OAuthException (code 100, subcode 36008) "redirect_uri is not identical".
+    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.META_APP_ID}&client_secret=${process.env.META_APP_SECRET}&code=${receivedCode}`;
 
     try {
         const tokenRes = await fetch(tokenUrl);
