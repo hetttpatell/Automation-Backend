@@ -67,6 +67,10 @@ app.use(metaRouter);
 import { initReputationCron } from './services/reputation.service.js';
 initReputationCron();
 
+// Initialize the Daily Billing Cycle Enforcement cron worker
+import { initBillingCron } from './services/billing.cron.js';
+initBillingCron();
+
 // Start listening for inbound connections on the configured HTTP Port
 app.listen(env.PORT, () => {
   console.log(`===================================================`);

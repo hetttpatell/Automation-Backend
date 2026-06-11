@@ -29,6 +29,15 @@ const PLAN_MAPPING = {
   domination: process.env.RAZORPAY_PLAN_DOMINATION,
 };
 
+// Helper: Map tier to base credits allowance
+function getBaseCreditsForTier(tier) {
+  const normalized = tier ? tier.toLowerCase() : '';
+  if (normalized === 'starter') return 500;
+  if (normalized === 'growth' || normalized === 'pro') return 2500;
+  if (normalized === 'domination') return 10000;
+  return 50; // free/default
+}
+
 // ─── Helper: Extract & verify Supabase user from Bearer token ───────
 async function authenticateRequest(req) {
   const authHeader = req.headers.authorization;
@@ -88,6 +97,18 @@ export async function handleRazorpayWebhook(req, res) {
         return res.status(400).json({ error: 'Missing tenant_id in notes' });
       }
 
+      // 1. Fetch current tenant details to preserve top-ups
+      const { data: tenant, error: fetchError } = await supabase
+        .from('tenants')
+        .select('subscription_tier, ai_credits_balance, ai_credits_limit')
+        .eq('id', tenantId)
+        .single();
+
+      if (fetchError || !tenant) {
+        console.error(`[Razorpay Webhook] Tenant not found for ID: ${tenantId}`, fetchError?.message);
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
       // Map tier to credits balance and limit allocations
       let tier = 'free';
       let baseCredits = 50;
@@ -116,15 +137,46 @@ export async function handleRazorpayWebhook(req, res) {
         }
       }
 
-      console.log(`[Razorpay Webhook] Refilling credits for tenant: ${tenantId}. Tier: ${tier}, Credits: ${baseCredits}`);
+      // Preserve top-ups logic
+      const prevBaseCredits = getBaseCreditsForTier(tenant.subscription_tier);
+      const extraLimit = Math.max(0, (tenant.ai_credits_limit || 0) - prevBaseCredits);
+      const preservedTopUps = Math.min(extraLimit, tenant.ai_credits_balance || 0);
+
+      const newLimit = baseCredits + extraLimit;
+      const newBalance = baseCredits + preservedTopUps;
+
+      // ── Compute billing cycle dates ──────────────────────────────
+      const billingCycleStart = new Date();
+      const billingCycleEnd = new Date();
+      billingCycleEnd.setMonth(billingCycleEnd.getMonth() + 1);
+
+      console.log(`[Razorpay Webhook] Refilling credits for tenant: ${tenantId}. Tier: ${tier}, Credits: ${baseCredits}, Preserved Top-Ups: ${preservedTopUps}, New Balance: ${newBalance}, New Limit: ${newLimit}`);
+      console.log(`[Razorpay Webhook] Billing cycle: ${billingCycleStart.toISOString()} → ${billingCycleEnd.toISOString()}`);
 
       const { error: updateError } = await supabase
         .from('tenants')
         .update({
+          // Tier & status
           subscription_tier: tier,
           subscription_status: 'active',
-          ai_credits_balance: baseCredits,
-          ai_credits_limit: baseCredits,
+          plan_type: tier,
+          planType: tier,
+
+          // Credits
+          ai_credits_balance: newBalance,
+          ai_credits_limit: newLimit,
+          tokens: baseCredits,
+
+          // Billing cycle boundaries
+          billing_cycle_start: billingCycleStart.toISOString(),
+          billingCycleStart: billingCycleStart.toISOString(),
+          billing_cycle_end: billingCycleEnd.toISOString(),
+          billingCycleEnd: billingCycleEnd.toISOString(),
+
+          // Clear grace period — payment succeeded
+          billing_grace_period_end: null,
+
+          // Razorpay reference
           razorpay_subscription_id: subscription.id,
         })
         .eq('id', tenantId);
@@ -133,6 +185,52 @@ export async function handleRazorpayWebhook(req, res) {
         console.error(`[Razorpay Webhook] Supabase update failed:`, updateError.message);
         return res.status(500).json({ error: 'Database update failed' });
       }
+    }
+    // ── subscription.halted ──────────────────────────────────────────
+    // Razorpay fires this when all payment retry attempts have failed.
+    // Immediately downgrade the tenant to free — do not wait for the cron.
+    else if (event === 'subscription.halted' || event === 'subscription.cancelled') {
+      const subscription = payload.payload.subscription.entity;
+      const notes = subscription.notes || {};
+      const tenantId = notes.tenant_id;
+
+      if (!tenantId) {
+        console.error(`[Razorpay Webhook] tenant_id missing from ${event} subscription notes.`);
+        return res.status(400).json({ error: 'Missing tenant_id in notes' });
+      }
+
+      const statusLabel = event === 'subscription.halted' ? 'halted' : 'cancelled';
+      console.log(`[Razorpay Webhook] ⚠️ Subscription ${statusLabel} for tenant: ${tenantId}. Downgrading to free plan.`);
+
+      const { error: downgradeError } = await supabase
+        .from('tenants')
+        .update({
+          // Tier & status
+          subscription_tier: 'free',
+          plan_type: 'free',
+          planType: 'free',
+          subscription_status: statusLabel,
+
+          // Reset credits/tokens to free-tier defaults
+          tokens: 50,
+          ai_credits_balance: 50,
+          ai_credits_limit: 50,
+
+          // Clear billing cycle fields
+          billing_cycle_start: null,
+          billingCycleStart: null,
+          billing_cycle_end: null,
+          billingCycleEnd: null,
+          billing_grace_period_end: null,
+        })
+        .eq('id', tenantId);
+
+      if (downgradeError) {
+        console.error(`[Razorpay Webhook] Failed to downgrade tenant ${tenantId}:`, downgradeError.message);
+        return res.status(500).json({ error: 'Database downgrade failed' });
+      }
+
+      console.log(`[Razorpay Webhook] ✅ Tenant ${tenantId} downgraded to free plan (${statusLabel}).`);
     }
     // ── order.paid / payment.captured ────────────────────────────────
     else if (event === 'order.paid' || event === 'payment.captured') {
@@ -477,15 +575,46 @@ export async function verifyPayment(req, res) {
         }
       }
 
-      console.log(`[Razorpay Verification] Updating tenant ${tenantId} to Subscription Tier: ${tier}, Credits: ${baseCredits}`);
+      // Preserve top-ups logic
+      const prevBaseCredits = getBaseCreditsForTier(tenant.subscription_tier);
+      const extraLimit = Math.max(0, (tenant.ai_credits_limit || 0) - prevBaseCredits);
+      const preservedTopUps = Math.min(extraLimit, tenant.ai_credits_balance || 0);
+
+      const newLimit = baseCredits + extraLimit;
+      const newBalance = baseCredits + preservedTopUps;
+
+      // Compute billing cycle dates
+      const billingCycleStart = new Date();
+      const billingCycleEnd = new Date();
+      billingCycleEnd.setMonth(billingCycleEnd.getMonth() + 1);
+
+      console.log(`[Razorpay Verification] Updating tenant ${tenantId} to Subscription Tier: ${tier}, Credits: ${baseCredits}, Preserved Top-Ups: ${preservedTopUps}, New Balance: ${newBalance}, New Limit: ${newLimit}`);
+      console.log(`[Razorpay Verification] Billing cycle: ${billingCycleStart.toISOString()} → ${billingCycleEnd.toISOString()}`);
 
       const { error: updateError } = await supabase
         .from('tenants')
         .update({
+          // Tier & status
           subscription_tier: tier,
           subscription_status: 'active',
-          ai_credits_balance: baseCredits,
-          ai_credits_limit: baseCredits,
+          plan_type: tier,
+          planType: tier,
+
+          // Credits
+          ai_credits_balance: newBalance,
+          ai_credits_limit: newLimit,
+          tokens: baseCredits,
+
+          // Billing cycle boundaries
+          billing_cycle_start: billingCycleStart.toISOString(),
+          billingCycleStart: billingCycleStart.toISOString(),
+          billing_cycle_end: billingCycleEnd.toISOString(),
+          billingCycleEnd: billingCycleEnd.toISOString(),
+
+          // Clear grace period — payment succeeded
+          billing_grace_period_end: null,
+
+          // Razorpay reference
           razorpay_subscription_id: razorpay_subscription_id,
         })
         .eq('id', tenantId);

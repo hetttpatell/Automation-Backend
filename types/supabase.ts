@@ -14,6 +14,44 @@ export type Database = {
   }
   public: {
     Tables: {
+      campaigns: {
+        Row: {
+          campaign_name: string
+          created_at: string | null
+          custom_message_body: string
+          id: string
+          target_stage: string
+          tenant_id: string
+          total_messages_sent: number | null
+        }
+        Insert: {
+          campaign_name: string
+          created_at?: string | null
+          custom_message_body: string
+          id?: string
+          target_stage: string
+          tenant_id: string
+          total_messages_sent?: number | null
+        }
+        Update: {
+          campaign_name?: string
+          created_at?: string | null
+          custom_message_body?: string
+          id?: string
+          target_stage?: string
+          tenant_id?: string
+          total_messages_sent?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       conversations: {
         Row: {
           chat_summary: string | null
@@ -91,9 +129,14 @@ export type Database = {
           customer_name: string
           customer_phone: string
           id: string
+          intent_category: string | null
           kanban_stage: string | null
+          requires_human_support: boolean | null
+          review_request_sent: boolean | null
           service_requested: string | null
+          summary_of_needs: string | null
           tenant_id: string
+          updated_at: string | null
           urgency: string | null
         }
         Insert: {
@@ -102,9 +145,14 @@ export type Database = {
           customer_name: string
           customer_phone: string
           id?: string
+          intent_category?: string | null
           kanban_stage?: string | null
+          requires_human_support?: boolean | null
+          review_request_sent?: boolean | null
           service_requested?: string | null
+          summary_of_needs?: string | null
           tenant_id: string
+          updated_at?: string | null
           urgency?: string | null
         }
         Update: {
@@ -113,9 +161,14 @@ export type Database = {
           customer_name?: string
           customer_phone?: string
           id?: string
+          intent_category?: string | null
           kanban_stage?: string | null
+          requires_human_support?: boolean | null
+          review_request_sent?: boolean | null
           service_requested?: string | null
+          summary_of_needs?: string | null
           tenant_id?: string
+          updated_at?: string | null
           urgency?: string | null
         }
         Relationships: [
@@ -182,48 +235,129 @@ export type Database = {
       }
       tenants: {
         Row: {
+          ai_credits_balance: number | null
+          ai_credits_limit: number | null
           ai_model: string | null
           ai_system_instruction: string | null
           ai_tone: string | null
+          billing_cycle_end: string | null
+          billing_cycle_start: string | null
+          billing_grace_period_end: string | null
+          billingCycleEnd: string | null
+          billingCycleStart: string | null
+          bot_language: string | null
           business_name: string
           created_at: string | null
+          gcal_access_token: string | null
+          gcal_calendar_id: string | null
+          gcal_refresh_token: string | null
+          google_review_link: string | null
+          hours_text: string | null
           id: string
+          is_calendar_connected: boolean | null
           max_token_allowance: number | null
           owner_email: string
+          payment_methods_text: string | null
+          plan_type: string | null
+          planType: string | null
+          razorpay_customer_id: string | null
+          razorpay_subscription_id: string | null
+          razorpaySubscriptionId: string | null
+          rules_text: string | null
+          services_text: string | null
+          subscription_status: string | null
           subscription_tier: string | null
+          system_prompt: string | null
+          target_audience_text: string | null
+          tokens: number | null
           tokens_used_this_month: number | null
           waba_id: string | null
           whatsapp_access_token: string | null
+          whatsapp_business_account_id: string | null
           whatsapp_phone_number_id: string | null
         }
         Insert: {
+          ai_credits_balance?: number | null
+          ai_credits_limit?: number | null
           ai_model?: string | null
           ai_system_instruction?: string | null
           ai_tone?: string | null
+          billing_cycle_end?: string | null
+          billing_cycle_start?: string | null
+          billing_grace_period_end?: string | null
+          billingCycleEnd?: string | null
+          billingCycleStart?: string | null
+          bot_language?: string | null
           business_name: string
           created_at?: string | null
+          gcal_access_token?: string | null
+          gcal_calendar_id?: string | null
+          gcal_refresh_token?: string | null
+          google_review_link?: string | null
+          hours_text?: string | null
           id?: string
+          is_calendar_connected?: boolean | null
           max_token_allowance?: number | null
           owner_email: string
+          payment_methods_text?: string | null
+          plan_type?: string | null
+          planType?: string | null
+          razorpay_customer_id?: string | null
+          razorpay_subscription_id?: string | null
+          razorpaySubscriptionId?: string | null
+          rules_text?: string | null
+          services_text?: string | null
+          subscription_status?: string | null
           subscription_tier?: string | null
+          system_prompt?: string | null
+          target_audience_text?: string | null
+          tokens?: number | null
           tokens_used_this_month?: number | null
           waba_id?: string | null
           whatsapp_access_token?: string | null
+          whatsapp_business_account_id?: string | null
           whatsapp_phone_number_id?: string | null
         }
         Update: {
+          ai_credits_balance?: number | null
+          ai_credits_limit?: number | null
           ai_model?: string | null
           ai_system_instruction?: string | null
           ai_tone?: string | null
+          billing_cycle_end?: string | null
+          billing_cycle_start?: string | null
+          billing_grace_period_end?: string | null
+          billingCycleEnd?: string | null
+          billingCycleStart?: string | null
+          bot_language?: string | null
           business_name?: string
           created_at?: string | null
+          gcal_access_token?: string | null
+          gcal_calendar_id?: string | null
+          gcal_refresh_token?: string | null
+          google_review_link?: string | null
+          hours_text?: string | null
           id?: string
+          is_calendar_connected?: boolean | null
           max_token_allowance?: number | null
           owner_email?: string
+          payment_methods_text?: string | null
+          plan_type?: string | null
+          planType?: string | null
+          razorpay_customer_id?: string | null
+          razorpay_subscription_id?: string | null
+          razorpaySubscriptionId?: string | null
+          rules_text?: string | null
+          services_text?: string | null
+          subscription_status?: string | null
           subscription_tier?: string | null
+          system_prompt?: string | null
+          target_audience_text?: string | null
+          tokens?: number | null
           tokens_used_this_month?: number | null
           waba_id?: string | null
           whatsapp_access_token?: string | null
+          whatsapp_business_account_id?: string | null
           whatsapp_phone_number_id?: string | null
         }
         Relationships: []
@@ -233,7 +367,11 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      decrement_tenant_credits: { Args: { tenant_id: string }; Returns: number }
+      increment_tenant_credits: {
+        Args: { amount: number; tenant_id: string }
+        Returns: number
+      }
     }
     Enums: {
       [_ in never]: never
