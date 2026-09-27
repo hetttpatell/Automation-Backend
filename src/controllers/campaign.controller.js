@@ -172,12 +172,14 @@ export async function sendCampaign(req, res) {
     const tenantId = user.id;
 
     // ── 2. Validate inputs ──
-    const { campaign_name, custom_message_body, target_stage, template_name, template_lang } = req.body;
+    const { campaign_name, custom_message_body, target_stage, template_name, template_lang, recipients } = req.body;
 
-    if (!campaign_name || !custom_message_body || !target_stage) {
+    const hasRecipients = Array.isArray(recipients) && recipients.length > 0;
+
+    if (!campaign_name || !custom_message_body || (!target_stage && !hasRecipients)) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: campaign_name, custom_message_body, target_stage',
+        message: 'Missing required fields: campaign_name, custom_message_body, and either target_stage or recipients list',
       });
     }
 
@@ -225,26 +227,56 @@ export async function sendCampaign(req, res) {
 
     const businessName = tenant.business_name || 'Our Business';
 
-    // ── 5. Query all leads matching target_stage ──
-    const { data: leads, error: leadsError } = await supabase
-      .from('leads')
-      .select('*')
-      .eq('tenant_id', tenantId)
-      .eq('kanban_stage', target_stage);
+    // ── 5. Resolve target recipients (Imported file or CRM leads) ──
+    let leads = [];
+    const resolvedTargetStage = hasRecipients ? (target_stage || 'custom_import') : target_stage;
 
-    if (leadsError) {
-      console.error('[Campaign] Leads query error:', leadsError.message);
-      return res.status(500).json({
-        success: false,
-        message: `Failed to fetch target leads: ${leadsError.message}`,
-      });
-    }
+    if (hasRecipients) {
+      leads = recipients
+        .filter(r => r && (r.customer_phone || r.phone))
+        .map(r => {
+          const rawPhone = String(r.customer_phone || r.phone || '');
+          let clean = sanitizePhone(rawPhone);
+          // If 10 digits starting with 6-9, prefix 91 for India
+          if (/^[6-9]\d{9}$/.test(clean)) {
+            clean = '91' + clean;
+          }
+          return {
+            customer_name: (r.customer_name || r.name || '').trim() || 'Valued Customer',
+            customer_phone: clean,
+            is_imported: true,
+          };
+        })
+        .filter(r => r.customer_phone.length >= 7);
 
-    if (!leads || leads.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: `No leads found in the '${target_stage}' stage. Nothing to send.`,
-      });
+      if (leads.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No valid phone numbers found in the uploaded list. Please check your file formatting.',
+        });
+      }
+    } else {
+      const { data: dbLeads, error: leadsError } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('kanban_stage', target_stage);
+
+      if (leadsError) {
+        console.error('[Campaign] Leads query error:', leadsError.message);
+        return res.status(500).json({
+          success: false,
+          message: `Failed to fetch target leads: ${leadsError.message}`,
+        });
+      }
+
+      if (!dbLeads || dbLeads.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: `No leads found in the '${target_stage}' stage. Nothing to send.`,
+        });
+      }
+      leads = dbLeads;
     }
 
     console.log(
@@ -252,8 +284,8 @@ export async function sendCampaign(req, res) {
       `\n│           📣 CAMPAIGN BLAST STARTING                    │` +
       `\n├─────────────────────────────────────────────────────────┤` +
       `\n│ Campaign:  ${campaign_name.substring(0, 42).padEnd(42)}│` +
-      `\n│ Stage:     ${target_stage.padEnd(42)}│` +
-      `\n│ Leads:     ${String(leads.length).padEnd(42)}│` +
+      `\n│ Target:    ${(hasRecipients ? 'Custom File Import' : `Stage: ${target_stage}`).padEnd(42)}│` +
+      `\n│ Contacts:  ${String(leads.length).padEnd(42)}│` +
       `\n│ Mode:      ${(resolvedTemplateName ? `Template [${resolvedTemplateName}]` : 'Text (session)').padEnd(42)}│` +
       `\n└─────────────────────────────────────────────────────────┘`
     );
@@ -265,7 +297,7 @@ export async function sendCampaign(req, res) {
         tenant_id: tenantId,
         campaign_name,
         custom_message_body,
-        target_stage,
+        target_stage: resolvedTargetStage,
         total_messages_sent: 0,
       })
       .select()
@@ -358,6 +390,33 @@ export async function sendCampaign(req, res) {
             .from('conversations')
             .update({ updated_at: new Date().toISOString() })
             .eq('id', conversationId);
+        }
+
+        // If imported contact, ensure they exist in CRM leads table
+        if (lead.is_imported) {
+          try {
+            const { data: existingLead } = await supabase
+              .from('leads')
+              .select('id')
+              .eq('tenant_id', tenantId)
+              .eq('customer_phone', customerPhone)
+              .limit(1)
+              .maybeSingle();
+
+            if (!existingLead) {
+              await supabase.from('leads').insert({
+                tenant_id: tenantId,
+                customer_name: customerName,
+                customer_phone: customerPhone,
+                conversation_id: conversationId,
+                kanban_stage: 'contacted',
+                intent_category: 'GENERAL',
+                summary_of_needs: `Imported via campaign: ${campaign_name}`,
+              });
+            }
+          } catch (leadSyncErr) {
+            console.warn('[Campaign] Non-blocking lead sync warning:', leadSyncErr?.message);
+          }
         }
       } else {
         console.error(`[Campaign] ${leadIndex} ❌ ${customerName} (${customerPhone}) — ${result.error}`);
