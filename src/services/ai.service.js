@@ -4,6 +4,24 @@ import * as whatsappService from './whatsapp.service.js';
 import OpenAI from 'openai';
 import { supabase } from '../config/supabase.js';
 import { checkAvailability, bookAppointment } from './calendar.service.js';
+import { env } from '../config/env.js';
+
+// Lazily initialize OpenRouter client when an OpenRouter API key (sk-or-v1-...) is detected
+let openRouterClient = null;
+function getOpenRouterClient() {
+  if (!openRouterClient) {
+    const key = env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY;
+    openRouterClient = new OpenAI({
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey: key,
+      defaultHeaders: {
+        'HTTP-Referer': 'https://leadflow.app',
+        'X-Title': 'WhatsApp AI Automation'
+      }
+    });
+  }
+  return openRouterClient;
+}
 
 // Initialize OpenAI client lazily to prevent crashes at startup when OPENAI_API_KEY is not defined.
 let openai = null;
@@ -57,6 +75,188 @@ function cleanJsonString(str) {
     cleaned = cleaned.substring(firstBrace, lastBrace + 1);
   }
   return cleaned;
+}
+
+// Function calling tools schema for OpenAI / OpenRouter format
+const openAITools = [
+  {
+    type: 'function',
+    function: {
+      name: 'check_availability',
+      description: "Returns available time slots for a given date by querying the Google Calendar API for free/busy intervals during the tenant's business hours.",
+      parameters: {
+        type: 'object',
+        properties: {
+          date: {
+            type: 'string',
+            description: 'The date to check in YYYY-MM-DD format.'
+          }
+        },
+        required: ['date']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'book_appointment',
+      description: 'Creates a calendar event on the connected Google Calendar and returns a success confirmation.',
+      parameters: {
+        type: 'object',
+        properties: {
+          customer_name: {
+            type: 'string',
+            description: "The customer's name."
+          },
+          customer_phone: {
+            type: 'string',
+            description: "The customer's phone number."
+          },
+          date: {
+            type: 'string',
+            description: 'The date of the appointment in YYYY-MM-DD format.'
+          },
+          time: {
+            type: 'string',
+            description: "The time of the appointment in HH:MM format (24-hour) or '10:00 AM' format."
+          },
+          service_requested: {
+            type: 'string',
+            description: 'The detailing/service requested by the customer.'
+          }
+        },
+        required: ['customer_name', 'customer_phone', 'date', 'time', 'service_requested']
+      }
+    }
+  }
+];
+
+/**
+ * Handles LLM text generation and tool calling via OpenRouter API (OpenAI-compatible endpoint).
+ * Used automatically when an OpenRouter API key (sk-or-v1-...) is configured.
+ */
+async function processOpenRouterResponse(processedText, finalPrompt, resolvedTenantId, name) {
+  const maxRetries = 3;
+  let lastError = null;
+  let currentModel = 'google/gemini-2.5-flash';
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[OpenRouter AI] Attempting generation with model "${currentModel}" (Attempt ${attempt}/${maxRetries})...`);
+      const client = getOpenRouterClient();
+
+      const messages = [
+        { role: 'system', content: finalPrompt },
+        { role: 'user', content: processedText }
+      ];
+
+      let completion = await client.chat.completions.create({
+        model: currentModel,
+        messages,
+        tools: openAITools,
+        tool_choice: 'auto',
+        max_tokens: 800,
+        temperature: 0.3
+      });
+
+      let loopCount = 0;
+      const maxLoops = 5;
+
+      while (loopCount < maxLoops) {
+        const choice = completion.choices?.[0];
+        const message = choice?.message;
+        const toolCalls = message?.tool_calls || [];
+
+        if (toolCalls.length === 0) {
+          const content = message?.content || '';
+          if (!content.trim()) {
+            throw new Error('Empty response received from OpenRouter AI.');
+          }
+          return cleanJsonString(content);
+        }
+
+        // Add assistant's message with tool calls to conversation
+        messages.push(message);
+
+        // Execute tool calls
+        for (const call of toolCalls) {
+          const fnName = call.function?.name;
+          let args = {};
+          try {
+            args = JSON.parse(call.function?.arguments || '{}');
+          } catch (e) {
+            console.error(`[OpenRouter Tool] Failed to parse arguments:`, call.function?.arguments);
+          }
+
+          console.log(`[OpenRouter Tool] Executing "${fnName}" with arguments:`, args);
+
+          let result;
+          try {
+            if (fnName === 'check_availability') {
+              result = await checkAvailability(resolvedTenantId, args.date);
+            } else if (fnName === 'book_appointment') {
+              result = await bookAppointment(
+                resolvedTenantId,
+                args.customer_name,
+                args.customer_phone,
+                args.date,
+                args.time,
+                args.service_requested
+              );
+            } else {
+              result = { error: `Function "${fnName}" is not implemented.` };
+            }
+          } catch (toolErr) {
+            console.error(`[OpenRouter Tool Error] Failed running "${fnName}":`, toolErr);
+            result = { error: toolErr.message || 'Execution failed.' };
+          }
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: JSON.stringify(result)
+          });
+        }
+
+        completion = await client.chat.completions.create({
+          model: currentModel,
+          messages,
+          tools: openAITools,
+          tool_choice: 'auto',
+          max_tokens: 800,
+          temperature: 0.3
+        });
+
+        loopCount++;
+      }
+
+      const finalContent = completion.choices?.[0]?.message?.content || '';
+      if (!finalContent.trim()) {
+        throw new Error('Empty response received from OpenRouter AI after tool execution.');
+      }
+      return cleanJsonString(finalContent);
+    } catch (err) {
+      lastError = err;
+      console.warn(`⚠️ Warning: Failed generating with OpenRouter model "${currentModel}" on attempt ${attempt}. Error:`, err.message || err);
+
+      const isRateLimit = err.status === 429 || (err.message && err.message.includes('429'));
+      const isServiceUnavailable = err.status === 503 || (err.message && (err.message.includes('503') || err.message.includes('UNAVAILABLE')));
+
+      if (isRateLimit || isServiceUnavailable) {
+        console.warn(`[OpenRouter AI] 🔄 Quota or load limit detected. Falling back to "google/gemini-2.5-flash-lite".`);
+        currentModel = 'google/gemini-2.5-flash-lite';
+      }
+
+      if (attempt < maxRetries) {
+        const delay = attempt * 1500;
+        console.log(`[OpenRouter AI] Waiting ${delay}ms before next retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  console.error(`❌ Error: All OpenRouter attempts failed for ${name}. Last error:`, lastError);
+  throw lastError || new Error(`Failed to generate response for ${name}.`);
 }
 
 /**
@@ -247,6 +447,13 @@ CUSTOMER'S NEW MESSAGE: "${currentMessage}"
 
 Respond using the exact JSON schema requested.
 `.trim();
+
+  // ── 3.5 Auto-Detect OpenRouter Key & Route via OpenRouter API ──────────────
+  const isOpenRouter = env.GEMINI_API_KEY?.startsWith('sk-or-') || Boolean(process.env.OPENROUTER_API_KEY);
+  if (isOpenRouter) {
+    console.log(`[AI Routing] OpenRouter API key detected (${env.GEMINI_API_KEY ? env.GEMINI_API_KEY.substring(0, 10) + '...' : 'env'}). Routing message through OpenRouter AI pipeline.`);
+    return await processOpenRouterResponse(processedText, finalPrompt, resolvedTenantId, name);
+  }
 
   // ── 4. Gemini API Call with Hard Token Limits, Function Calling & Robust Retries ──
   const maxRetries = 3;

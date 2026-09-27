@@ -13,13 +13,14 @@ export async function ensureDefaultTenant() {
   if (defaultTenantId) return defaultTenantId;
 
   try {
-    // 1. Try to find the default tenant by email
-    const { data: existing, error: selectError } = await supabase
-      .from('tenants')
-      .select('id')
-      .eq('owner_email', 'admin@detailing.com')
-      .limit(1)
-      .single();
+    // 1. Try to find the default tenant by whatsapp_phone_number_id or email
+    let query = supabase.from('tenants').select('id');
+    if (env.WHATSAPP_PHONE_NUMBER_ID) {
+      query = query.or(`whatsapp_phone_number_id.eq.${env.WHATSAPP_PHONE_NUMBER_ID},owner_email.eq.admin@detailing.com`);
+    } else {
+      query = query.eq('owner_email', 'admin@detailing.com');
+    }
+    const { data: existing } = await query.limit(1).maybeSingle();
 
     if (existing) {
       defaultTenantId = existing.id;
