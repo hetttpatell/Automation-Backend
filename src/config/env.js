@@ -5,7 +5,6 @@ dotenv.config();
 
 // Define the schema/keys for the environment variables our system depends on
 const requiredEnvVars = [
-  'GEMINI_API_KEY',
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
   'META_WEBHOOK_VERIFY_TOKEN',
@@ -21,6 +20,11 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
+// Require at least one AI key: OPENROUTER_API_KEY or GEMINI_API_KEY
+if (!process.env.OPENROUTER_API_KEY && !process.env.GEMINI_API_KEY) {
+  missingVars.push('OPENROUTER_API_KEY (or GEMINI_API_KEY)');
+}
+
 // If there are any missing environment variables, throw a descriptive error immediately to prevent runtime failures
 if (missingVars.length > 0) {
   console.error('❌ Critical Environment Variables Missing:', missingVars.join(', '));
@@ -29,7 +33,8 @@ if (missingVars.length > 0) {
 
 // Export the validated environment configuration object for application-wide consumption
 export const env = {
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY,
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY,
   SUPABASE_URL: process.env.SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
   META_WEBHOOK_VERIFY_TOKEN: process.env.META_WEBHOOK_VERIFY_TOKEN,

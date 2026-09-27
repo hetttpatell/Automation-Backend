@@ -1,10 +1,13 @@
 import { GoogleGenAI } from '@google/genai';
 import { env } from './env.js';
 
-// Initialize and instantiate the GoogleGenAI client with the validated API Key.
-// This client manages secure authentication and structure configuration for all
-// communication targeting the Gemini API endpoint.
-export const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+// Initialize and instantiate the GoogleGenAI client with the validated API Key if available.
+// If using OpenRouter primarily, a safe fallback key prevents startup validation crashes.
+const googleKey = (env.GEMINI_API_KEY && !env.GEMINI_API_KEY.startsWith('sk-or-')) 
+  ? env.GEMINI_API_KEY 
+  : 'AIza_dummy_key_for_openrouter_setup';
+
+export const ai = new GoogleGenAI({ apiKey: googleKey });
 
 /*
 =========================================

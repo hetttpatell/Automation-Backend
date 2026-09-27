@@ -448,10 +448,11 @@ CUSTOMER'S NEW MESSAGE: "${currentMessage}"
 Respond using the exact JSON schema requested.
 `.trim();
 
-  // ── 3.5 Auto-Detect OpenRouter Key & Route via OpenRouter API ──────────────
-  const isOpenRouter = env.GEMINI_API_KEY?.startsWith('sk-or-') || Boolean(process.env.OPENROUTER_API_KEY);
-  if (isOpenRouter) {
-    console.log(`[AI Routing] OpenRouter API key detected (${env.GEMINI_API_KEY ? env.GEMINI_API_KEY.substring(0, 10) + '...' : 'env'}). Routing message through OpenRouter AI pipeline.`);
+  // ── 3.5 Primary AI Provider: OpenRouter (with native Gemini fallback if native AIza key provided) ──
+  const isNativeGemini = env.GEMINI_API_KEY && env.GEMINI_API_KEY.startsWith('AIza');
+  if (!isNativeGemini) {
+    const activeKey = env.OPENROUTER_API_KEY || env.GEMINI_API_KEY || '';
+    console.log(`[AI Pipeline] Executing via OpenRouter (Key: ${activeKey.substring(0, 10)}...).`);
     return await processOpenRouterResponse(processedText, finalPrompt, resolvedTenantId, name);
   }
 
