@@ -35,6 +35,7 @@ if (missingVars.length > 0) {
 export const env = {
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY,
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free',
   SUPABASE_URL: process.env.SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
   META_WEBHOOK_VERIFY_TOKEN: process.env.META_WEBHOOK_VERIFY_TOKEN,

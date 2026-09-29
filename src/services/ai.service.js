@@ -138,7 +138,7 @@ const openAITools = [
 async function processOpenRouterResponse(processedText, finalPrompt, resolvedTenantId, name) {
   const maxRetries = 3;
   let lastError = null;
-  let currentModel = 'google/gemini-2.5-flash';
+  const currentModel = env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -238,14 +238,6 @@ async function processOpenRouterResponse(processedText, finalPrompt, resolvedTen
     } catch (err) {
       lastError = err;
       console.warn(`⚠️ Warning: Failed generating with OpenRouter model "${currentModel}" on attempt ${attempt}. Error:`, err.message || err);
-
-      const isRateLimit = err.status === 429 || (err.message && err.message.includes('429'));
-      const isServiceUnavailable = err.status === 503 || (err.message && (err.message.includes('503') || err.message.includes('UNAVAILABLE')));
-
-      if (isRateLimit || isServiceUnavailable) {
-        console.warn(`[OpenRouter AI] 🔄 Quota or load limit detected. Falling back to "google/gemini-2.5-flash-lite".`);
-        currentModel = 'google/gemini-2.5-flash-lite';
-      }
 
       if (attempt < maxRetries) {
         const delay = attempt * 1500;

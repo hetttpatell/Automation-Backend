@@ -56,10 +56,41 @@ export async function handleWebhookEvent(req, res) {
   const status = value?.statuses?.[0];
   const message = value?.messages?.[0];
 
-  // Route status events (delivered, read, sent, etc.) to console logs
+  // Route status events (delivered, read, sent, failed, etc.) to database and console logs
   if (status) {
-    console.log(`ℹ️ Status/Receipt Event Detected: ${status.status}`);
-    return res.status(200).send('EVENT_RECEIVED');
+    const metaMessageId = status.id;
+    const deliveryStatus = status.status; // 'sent', 'delivered', 'read', 'failed'
+    const errorObj = status.errors?.[0];
+    const errorDetails = errorObj 
+      ? (errorObj.error_data?.details || errorObj.message || errorObj.title || `Error code ${errorObj.code}`)
+      : null;
+
+    console.log(`ℹ️ Status/Receipt Event Detected: [${metaMessageId}] => ${deliveryStatus} ${errorDetails ? `(${errorDetails})` : ''}`);
+
+    res.status(200).send('EVENT_RECEIVED');
+
+    // Asynchronously update message in Supabase
+    (async () => {
+      try {
+        const updateData = { status: deliveryStatus };
+        if (errorDetails) {
+          updateData.error_message = errorDetails;
+        }
+        const { error: updateError } = await supabase
+          .from('messages')
+          .update(updateData)
+          .eq('whatsapp_message_id', metaMessageId);
+
+        if (updateError) {
+          console.error(`[Webhook Status] Failed to update message ${metaMessageId}:`, updateError.message);
+        } else {
+          console.log(`[Webhook Status] Successfully updated message ${metaMessageId} to ${deliveryStatus}`);
+        }
+      } catch (err) {
+        console.error(`[Webhook Status] Exception updating message status:`, err.message);
+      }
+    })();
+    return;
   } 
   
   if (message) {
@@ -328,32 +359,47 @@ export async function handleWebhookEvent(req, res) {
               : aiReplyText;
 
             // Log AI message to Supabase messages table
-            const { error: insertMsgError } = await supabase
+            const { data: insertedAiMsg, error: insertMsgError } = await supabase
               .from('messages')
               .insert({
                 conversation_id: conversationId,
                 tenant_id: resolvedTenantId,
                 sender: 'ai',
-                message_text: dbText
-              });
+                message_text: dbText,
+                status: 'sending'
+              })
+              .select('id')
+              .single();
 
             if (insertMsgError) {
               console.error(`[Webhook Background] ⚠️ Failed to save AI response to DB:`, insertMsgError.message);
             }
 
             // Step A: Send reply_message via the WhatsApp API immediately
-            let messageSentSuccessfully = false;
+            let sendResult = null;
 
             if (hasMenu) {
               const cleanedReply = aiReplyText.replace('[SHOW_MENU]', '').trim();
-              let textSent = true;
               if (cleanedReply) {
-                textSent = await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, cleanedReply);
+                sendResult = await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, cleanedReply);
               }
               const menuSent = await whatsappService.sendWhatsAppInteractiveMenu(resolvedTenantId, customerPhone);
-              messageSentSuccessfully = textSent || menuSent;
+              sendResult = sendResult || { success: Boolean(menuSent), messageId: null };
             } else {
-              messageSentSuccessfully = await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, aiReplyText);
+              sendResult = await whatsappService.sendWhatsAppMessage(resolvedTenantId, customerPhone, aiReplyText);
+            }
+
+            const messageSentSuccessfully = sendResult?.success || false;
+            const aiMsgId = sendResult?.messageId || null;
+
+            if (insertedAiMsg?.id) {
+              await supabase
+                .from('messages')
+                .update({
+                  whatsapp_message_id: aiMsgId,
+                  status: messageSentSuccessfully ? 'sent' : 'failed'
+                })
+                .eq('id', insertedAiMsg.id);
             }
 
             // Decrement: Upon an HTTP 200 message receipt confirmation from Meta, decrement the corresponding tenant's credits by exactly 1
@@ -473,9 +519,9 @@ export const sendMessageFromHuman = async (req, res) => {
     console.log("DEBUG: Controller reached. Request body:", JSON.stringify(req.body, null, 2));
 
     const body = req.body || req || {};
-    const { conversationId, customerPhone, messageText, tenantId } = body;
+    const { conversationId, customerPhone, messageText, tenantId, templateName, templateLang } = body;
 
-    if (!conversationId || !customerPhone || !messageText || !tenantId) {
+    if (!conversationId || !customerPhone || (!messageText && !templateName) || !tenantId) {
       return res.status(400).json({ error: 'Missing required parameters.' });
     }
 
@@ -486,7 +532,7 @@ export const sendMessageFromHuman = async (req, res) => {
     // Fetch tenant credentials from DB
     const { data: tenant, error: tenantError } = await supabase
       .from('tenants')
-      .select('id, whatsapp_phone_number_id, whatsapp_access_token')
+      .select('id, whatsapp_phone_number_id, whatsapp_access_token, whatsapp_business_account_id')
       .eq(queryColumn, tenantId)
       .single();
 
@@ -494,24 +540,66 @@ export const sendMessageFromHuman = async (req, res) => {
       throw new Error("Could not find tenant credentials in database.");
     }
 
-    console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
-    // 1. Send manual message via WhatsApp Cloud API
-    await whatsappService.sendWhatsAppMessage(
-      tenantId,
-      customerPhone,
-      messageText,
-      tenant.whatsapp_access_token
-    );
+    // Fetch latest message from customer to determine 24-hour service window status
+    const { data: lastCustomerMsg } = await supabase
+      .from('messages')
+      .select('created_at')
+      .eq('conversation_id', conversationId)
+      .eq('sender', 'customer')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const now = Date.now();
+    const lastCustomerTime = lastCustomerMsg ? new Date(lastCustomerMsg.created_at).getTime() : 0;
+    const isWindowOpen = lastCustomerTime > 0 && (now - lastCustomerTime) < 24 * 60 * 60 * 1000;
+
+    let sendResult;
+    let savedText = messageText;
+
+    if (templateName) {
+      // Send as template
+      console.log(`[Human Message] Forwarding template "${templateName}" to ${customerPhone}...`);
+      sendResult = await whatsappService.sendWhatsAppTemplateMessage(
+        tenant.id,
+        customerPhone,
+        templateName,
+        templateLang || 'en',
+        messageText || null,
+        tenant.whatsapp_access_token
+      );
+      savedText = messageText || `[Template: ${templateName}]`;
+    } else if (!isWindowOpen) {
+      console.warn(`[Human Message] ⚠️ 24-hour window expired for conversation ${conversationId}. Free-form text blocked by WhatsApp.`);
+      return res.status(400).json({
+        error: 'The 24-hour WhatsApp messaging window is closed because the customer has not replied in the last 24 hours. Regular text messages cannot be delivered. Please send an approved template message to re-open the conversation.',
+        isWindowExpired: true
+      });
+    } else {
+      // 24-hour window is active, send free-form text
+      console.log(`[Human Message] Forwarding message to WhatsApp: "${messageText}" for phone ${customerPhone}...`);
+      sendResult = await whatsappService.sendWhatsAppMessage(
+        tenant.id,
+        customerPhone,
+        messageText,
+        tenant.whatsapp_access_token
+      );
+      savedText = messageText;
+    }
+
+    const whatsappMessageId = sendResult?.messageId || null;
 
     console.log(`[Supabase] Saving human message for conversation ${conversationId}...`);
-    // 2. Persist the human's response in the Supabase messages table
+    // 2. Persist the human's response in the Supabase messages table with status
     const { data, error } = await supabase
       .from('messages')
       .insert({
         conversation_id: conversationId,
         tenant_id: tenant.id,
         sender: 'human',
-        message_text: messageText
+        message_text: savedText,
+        whatsapp_message_id: whatsappMessageId,
+        status: 'sent'
       })
       .select()
       .single();
@@ -537,6 +625,54 @@ export const sendMessageFromHuman = async (req, res) => {
       console.error('Meta API Error Details:', JSON.stringify(error.response.data, null, 2));
     }
     return res.status(500).json({ error: error.message, stack: error.stack });
+  }
+};
+
+/**
+ * Fetches approved WhatsApp message templates for a tenant from Meta Graph API.
+ */
+export const getWhatsAppTemplates = async (req, res) => {
+  try {
+    const tenantId = req.query.tenantId;
+    if (!tenantId) {
+      return res.status(400).json({ error: 'Missing tenantId query parameter.' });
+    }
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+    const queryColumn = isUuid ? 'id' : 'whatsapp_phone_number_id';
+
+    const { data: tenant, error } = await supabase
+      .from('tenants')
+      .select('whatsapp_business_account_id, whatsapp_access_token')
+      .eq(queryColumn, tenantId)
+      .single();
+
+    if (error || !tenant) {
+      return res.status(404).json({ error: 'Tenant credentials not found.' });
+    }
+
+    const wabaId = tenant.whatsapp_business_account_id;
+    const token = tenant.whatsapp_access_token;
+
+    if (!wabaId || !token) {
+      return res.status(200).json({ templates: [] });
+    }
+
+    const response = await fetch(`https://graph.facebook.com/v20.0/${wabaId}/message_templates`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    const data = await response.json();
+    if (data.error) {
+      console.error('[Templates Fetch Error]:', data.error);
+      return res.status(200).json({ templates: [] });
+    }
+
+    const approvedTemplates = (data.data || []).filter(t => t.status === 'APPROVED');
+    return res.status(200).json({ templates: approvedTemplates });
+  } catch (err) {
+    console.error('[Templates Fetch Exception]:', err.message);
+    return res.status(500).json({ error: err.message, templates: [] });
   }
 };
 

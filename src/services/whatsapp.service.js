@@ -36,6 +36,8 @@ async function resolveCredentials(identifier) {
  * @param {string|null} tenantId - The tenant's ID.
  * @param {string} toPhone - The recipient's phone number.
  * @param {string} messageText - The message body.
+ * @param {string|null} accessToken - Optional override access token.
+ * @returns {Promise<{success: boolean, messageId: string|null}>}
  */
 export async function sendWhatsAppMessage(tenantId, toPhone, messageText, accessToken = null) {
   try {
@@ -77,14 +79,94 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
       }
     });
 
-    console.log(`Message successfully sent to ${cleanPhone}. Message ID: ${response.data.messages?.[0]?.id || 'unknown'}`);
-    return true;
+    const messageId = response.data.messages?.[0]?.id || null;
+    console.log(`Message successfully sent to ${cleanPhone}. Message ID: ${messageId || 'unknown'}`);
+    return { success: true, messageId };
   } catch (err) {
     console.error(`Axios/Credential error in sendWhatsAppMessage for ${toPhone}:`, err.message || err);
     if (err.response) {
       console.error("Meta API Response Error Data:", JSON.stringify(err.response.data, null, 2));
-      console.error("Meta API Response Status:", err.response.status);
-      console.error("Meta API Response Headers:", err.response.headers);
+      const code = err.response.data?.error?.code;
+      const details = err.response.data?.error?.error_data?.details || err.response.data?.error?.message;
+      if (code === 131047) {
+        throw new Error("WhatsApp 24-hour service window has expired. A pre-approved template message must be used to reach this customer.");
+      }
+      if (code === 131030) {
+        throw new Error("Recipient phone number is not in the allowed list for this Meta WhatsApp test account. Please add it in Meta Developer Portal.");
+      }
+      if (details) {
+        throw new Error(`WhatsApp API error: ${details}`);
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Sends a pre-approved template message to a customer's phone number via Meta's WhatsApp Cloud API.
+ * Required when sending outside the 24-hour customer service window.
+ * @param {string|null} tenantId - The tenant's ID.
+ * @param {string} toPhone - The recipient's phone number.
+ * @param {string} templateName - The pre-approved template name in Meta.
+ * @param {string} languageCode - Template language code (e.g. 'en', 'en_US').
+ * @param {string|null} bodyText - Optional text variable for positional parameter {{1}}.
+ * @param {string|null} accessToken - Optional override access token.
+ * @returns {Promise<{success: boolean, messageId: string|null}>}
+ */
+export async function sendWhatsAppTemplateMessage(tenantId, toPhone, templateName, languageCode = 'en', bodyText = null, accessToken = null) {
+  try {
+    let resolvedToken = accessToken;
+    let resolvedPhoneId = accessToken ? tenantId : null;
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+    if (!resolvedToken || isUuid) {
+      const creds = await resolveCredentials(tenantId);
+      resolvedToken = resolvedToken || creds.accessToken;
+      resolvedPhoneId = creds.phoneNumberId;
+    }
+    const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
+
+    const cleanPhone = String(toPhone).replace(/\D/g, '');
+    console.log(`Sending WhatsApp template "${templateName}" (${languageCode}) to ${cleanPhone} using Phone Number ID: ${resolvedPhoneId}...`);
+
+    const templatePayload = {
+      name: templateName,
+      language: { code: languageCode }
+    };
+
+    if (bodyText) {
+      templatePayload.components = [
+        {
+          type: 'body',
+          parameters: [{ type: 'text', text: bodyText }]
+        }
+      ];
+    }
+
+    const response = await axios.post(url, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanPhone,
+      type: 'template',
+      template: templatePayload
+    }, {
+      headers: {
+        'Authorization': `Bearer ${resolvedToken}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const messageId = response.data.messages?.[0]?.id || null;
+    console.log(`Template message "${templateName}" successfully sent to ${cleanPhone}. Message ID: ${messageId || 'unknown'}`);
+    return { success: true, messageId };
+  } catch (err) {
+    console.error(`Axios/Credential error in sendWhatsAppTemplateMessage for ${toPhone}:`, err.message || err);
+    if (err.response) {
+      console.error("Meta API Template Response Error Data:", JSON.stringify(err.response.data, null, 2));
+      const details = err.response.data?.error?.error_data?.details || err.response.data?.error?.message;
+      if (details) {
+        throw new Error(`WhatsApp Template API error: ${details}`);
+      }
     }
     throw err;
   }
