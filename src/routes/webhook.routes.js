@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { verifyWebhook, handleWebhookEvent, sendMessageFromHuman, getWhatsAppTemplates } from '../controllers/webhook.controller.js';
 import { sendCampaign } from '../controllers/campaign.controller.js';
+import { parsePdfDocument } from '../controllers/document.controller.js';
 
 // Instantiate Express Router instance
 const router = Router();
@@ -24,6 +25,10 @@ router.get('/api/whatsapp/templates', getWhatsAppTemplates);
 // Route: POST /api/campaigns/send
 // Triggers outbound campaign blast messages to targeted lead segments.
 router.post('/api/campaigns/send', sendCampaign);
+
+// Route: POST /api/parse-pdf
+// Parses uploaded PDF documents, extracts tabular contacts and detects Name & Phone columns.
+router.post('/api/parse-pdf', parsePdfDocument);
 
 // Export router instance for application binding
 export default router;

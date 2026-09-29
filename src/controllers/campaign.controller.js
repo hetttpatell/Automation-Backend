@@ -328,6 +328,7 @@ export async function sendCampaign(req, res) {
       // Variable placeholder substitution
       const personalizedMessage = custom_message_body
         .replace(/\{customer_name\}/g, customerName)
+        .replace(/\{name\}/g, customerName)
         .replace(/\{business_name\}/g, businessName);
 
       // Dispatch via Meta WhatsApp Cloud API

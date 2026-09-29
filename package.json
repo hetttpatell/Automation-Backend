@@ -22,6 +22,7 @@
     "googleapis": "^144.0.0",
     "node-cron": "^3.0.3",
     "openai": "^6.39.1",
+    "pdf-parse": "^2.4.5",
     "razorpay": "^2.9.6",
     "socket.io": "^4.8.3"
   },

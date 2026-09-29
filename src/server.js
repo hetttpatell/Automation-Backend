@@ -38,8 +38,8 @@ app.use(cors({
   credentials: true
 }));
 
-// Parse incoming payloads containing JSON format, essential for Meta's POST notifications
-app.use(express.json());
+// Parse incoming payloads containing JSON format (50mb limit to support rich PDF lead document imports)
+app.use(express.json({ limit: '50mb' }));
 
 // Global error handling middleware to gracefully intercept malformed JSON inputs and prevent crashes
 app.use((err, req, res, next) => {
