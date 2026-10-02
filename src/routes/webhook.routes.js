@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { verifyWebhook, handleWebhookEvent, sendMessageFromHuman, getWhatsAppTemplates } from '../controllers/webhook.controller.js';
-import { sendCampaign } from '../controllers/campaign.controller.js';
+import { sendCampaign, uploadCampaignPdf } from '../controllers/campaign.controller.js';
 import { parsePdfDocument } from '../controllers/document.controller.js';
 
 // Instantiate Express Router instance
@@ -25,6 +25,10 @@ router.get('/api/whatsapp/templates', getWhatsAppTemplates);
 // Route: POST /api/campaigns/send
 // Triggers outbound campaign blast messages to targeted lead segments.
 router.post('/api/campaigns/send', sendCampaign);
+
+// Route: POST /api/campaigns/upload-pdf
+// Uploads PDF campaign document to Supabase storage.
+router.post('/api/campaigns/upload-pdf', uploadCampaignPdf);
 
 // Route: POST /api/parse-pdf
 // Parses uploaded PDF documents, extracts tabular contacts and detects Name & Phone columns.

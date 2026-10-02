@@ -17,16 +17,24 @@ function sanitizePhone(phone) {
 function parseMetaError(responseData) {
   const err = responseData?.error || {};
   const code = err.code || 0;
-  const message = err.message || JSON.stringify(responseData);
+  let message = err.message || JSON.stringify(responseData);
 
-  // Meta error codes that indicate a template is required:
+  // Meta error codes:
+  // 131030 — Recipient phone number not in allowed list (Test/Sandbox account restriction)
   // 131047 — Re-engagement message (24h window expired)
   // 131026 — Message undeliverable (often session-related)
   // 131053 — Media/message outside session
   const sessionCodes = [131047, 131026, 131053];
   const isSessionExpired = sessionCodes.includes(code);
+  const isNotInAllowedList = code === 131030;
 
-  return { code, message, isSessionExpired };
+  if (isNotInAllowedList) {
+    message = `Recipient not in Meta test allowed list (#131030). Add this phone number in Meta Developer Portal (WhatsApp > API Setup > 'To' phone numbers), or switch to a Live WhatsApp Business Account.`;
+  } else if (isSessionExpired) {
+    message = `WhatsApp 24-hour service window expired (#${code}). Use a pre-approved template message to reach this customer.`;
+  }
+
+  return { code, message, isSessionExpired, isNotInAllowedList };
 }
 
 // ─── Meta WhatsApp Cloud API — Send Text Message ────────────────────
@@ -62,9 +70,18 @@ async function sendTextMessage(toPhone, messageText, phoneNumberId, activeToken)
   }
 }
 
-// ─── Meta WhatsApp Cloud API — Send Template Message ────────────────
-async function sendTemplateMessage(toPhone, templateName, languageCode, bodyText, phoneNumberId, activeToken) {
+// ─── Meta WhatsApp Cloud API — Send Document Message ────────────────
+async function sendDocumentMessage(toPhone, pdfUrl, filename, captionText, phoneNumberId, activeToken) {
   const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+
+  const documentPayload = {
+    link: pdfUrl,
+    filename: filename || 'Document.pdf',
+  };
+  if (captionText && captionText.trim()) {
+    let sanitized = captionText.replace(/^\s*\*\s+/gm, '• ').replace(/\*\*/g, '*');
+    documentPayload.caption = sanitized.substring(0, 1024);
+  }
 
   try {
     const response = await fetch(url, {
@@ -77,17 +94,8 @@ async function sendTemplateMessage(toPhone, templateName, languageCode, bodyText
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
         to: toPhone,
-        type: 'template',
-        template: {
-          name: templateName,
-          language: { code: languageCode },
-          components: [
-            {
-              type: 'body',
-              parameters: [{ type: 'text', text: bodyText }],
-            },
-          ],
-        },
+        type: 'document',
+        document: documentPayload,
       }),
     });
 
@@ -104,15 +112,110 @@ async function sendTemplateMessage(toPhone, templateName, languageCode, bodyText
   }
 }
 
+// ─── Meta WhatsApp Cloud API — Send Template Message ────────────────
+async function sendTemplateMessage(toPhone, templateName, languageCode, bodyText, phoneNumberId, activeToken, mediaHeader = null) {
+  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+
+  const components = [];
+  if (mediaHeader && mediaHeader.link) {
+    components.push({
+      type: 'header',
+      parameters: [
+        {
+          type: mediaHeader.type || 'document',
+          document: {
+            link: mediaHeader.link,
+            filename: mediaHeader.filename || 'Document.pdf',
+          },
+        },
+      ],
+    });
+  }
+
+  if (bodyText && bodyText.trim()) {
+    components.push({
+      type: 'body',
+      parameters: [{ type: 'text', text: bodyText }],
+    });
+  }
+
+  const postTemplate = async (comps) => {
+    const templatePayload = {
+      name: templateName,
+      language: { code: languageCode || 'en' },
+    };
+    if (comps && comps.length > 0) {
+      templatePayload.components = comps;
+    }
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${activeToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: toPhone,
+        type: 'template',
+        template: templatePayload,
+      }),
+    });
+  };
+
+  try {
+    let response = await postTemplate(components);
+    let data = await response.json();
+
+    // If Meta rejected with param mismatch (#132000), try fallback variations
+    if (!response.ok && data?.error?.code === 132000) {
+      console.warn(`[Campaign Template] Parameter mismatch for "${templateName}" (Error 132000). Retrying without body parameters...`);
+      const headerOnly = components.filter(c => c.type === 'header');
+      response = await postTemplate(headerOnly);
+      data = await response.json();
+
+      if (!response.ok && data?.error?.code === 132000 && headerOnly.length > 0) {
+        console.warn(`[Campaign Template] Retrying "${templateName}" with plain template (no components)...`);
+        response = await postTemplate([]);
+        data = await response.json();
+      }
+    }
+
+    if (response.ok) {
+      return { success: true, messageId: data.messages?.[0]?.id || 'unknown' };
+    }
+
+    const parsed = parseMetaError(data);
+    return { success: false, error: parsed.message, errorCode: parsed.code };
+  } catch (err) {
+    return { success: false, error: err?.message || 'Network error', errorCode: 0 };
+  }
+}
+
 // ─── Orchestrated Campaign Message Sender ───────────────────────────
-async function sendCampaignMessage(toPhone, personalizedText, phoneNumberId, activeToken, templateName, templateLang) {
+async function sendCampaignMessage(toPhone, personalizedText, phoneNumberId, activeToken, templateName, templateLang, media = null) {
   const cleanPhone = sanitizePhone(toPhone);
 
   // ── Template mode (preferred for campaigns) ──
   if (templateName) {
     const lang = templateLang || 'en';
-    console.log(`[Campaign] 📨 Sending template "${templateName}" to ${cleanPhone}`);
-    return sendTemplateMessage(cleanPhone, templateName, lang, personalizedText, phoneNumberId, activeToken);
+    console.log(`[Campaign] 📨 Sending template "${templateName}" to ${cleanPhone}${media?.link ? ' with PDF' : ''}`);
+    return sendTemplateMessage(cleanPhone, templateName, lang, personalizedText, phoneNumberId, activeToken, media);
+  }
+
+  // ── Document mode (when PDF is attached) ──
+  if (media && media.link) {
+    console.log(`[Campaign] 📎 Sending PDF document to ${cleanPhone} (filename: ${media.filename || 'Document.pdf'})`);
+    // If personalized text fits in caption (<= 1024 chars), send with caption
+    if (personalizedText && personalizedText.length <= 1024) {
+      return sendDocumentMessage(cleanPhone, media.link, media.filename, personalizedText, phoneNumberId, activeToken);
+    } else {
+      // If caption is longer than 1024 chars, send text first, then document
+      const textResult = await sendTextMessage(cleanPhone, personalizedText, phoneNumberId, activeToken);
+      if (!textResult.success) return textResult;
+      await delay(200);
+      return sendDocumentMessage(cleanPhone, media.link, media.filename, null, phoneNumberId, activeToken);
+    }
   }
 
   // ── Text mode (fallback — only works within 24h session window) ──
@@ -172,7 +275,7 @@ export async function sendCampaign(req, res) {
     const tenantId = user.id;
 
     // ── 2. Validate inputs ──
-    const { campaign_name, custom_message_body, target_stage, template_name, template_lang, recipients } = req.body;
+    const { campaign_name, custom_message_body, target_stage, template_name, template_lang, recipients, pdf_url, pdf_filename } = req.body;
 
     const hasRecipients = Array.isArray(recipients) && recipients.length > 0;
 
@@ -287,6 +390,7 @@ export async function sendCampaign(req, res) {
       `\n│ Target:    ${(hasRecipients ? 'Custom File Import' : `Stage: ${target_stage}`).padEnd(42)}│` +
       `\n│ Contacts:  ${String(leads.length).padEnd(42)}│` +
       `\n│ Mode:      ${(resolvedTemplateName ? `Template [${resolvedTemplateName}]` : 'Text (session)').padEnd(42)}│` +
+      `\n│ Media:     ${(pdf_filename ? `PDF: ${pdf_filename.substring(0, 37)}` : 'None (Text Only)').padEnd(42)}│` +
       `\n└─────────────────────────────────────────────────────────┘`
     );
 
@@ -299,6 +403,8 @@ export async function sendCampaign(req, res) {
         custom_message_body,
         target_stage: resolvedTargetStage,
         total_messages_sent: 0,
+        media_url: pdf_url || null,
+        media_filename: pdf_filename || null,
       })
       .select()
       .single();
@@ -319,6 +425,8 @@ export async function sendCampaign(req, res) {
     let successCount = 0;
     const failures = [];
 
+    const mediaAttachment = pdf_url ? { link: pdf_url, filename: pdf_filename || 'Document.pdf', type: 'document' } : null;
+
     for (let i = 0; i < leads.length; i++) {
       const lead = leads[i];
       const customerPhone = lead.customer_phone;
@@ -338,7 +446,8 @@ export async function sendCampaign(req, res) {
         phoneNumberId,
         activeToken,
         resolvedTemplateName || undefined,
-        resolvedTemplateLang
+        resolvedTemplateLang,
+        mediaAttachment
       );
 
       if (result.success) {
@@ -383,7 +492,14 @@ export async function sendCampaign(req, res) {
             conversation_id: conversationId,
             tenant_id: tenantId,
             sender: 'human',
-            message_text: `[Campaign: ${campaign_name}] ${personalizedMessage}`,
+            message_text: pdf_filename
+              ? `[Campaign: ${campaign_name}] 📄 ${pdf_filename}\n${personalizedMessage}`
+              : `[Campaign: ${campaign_name}] ${personalizedMessage}`,
+            media_url: pdf_url || null,
+            media_type: pdf_url ? 'document' : null,
+            media_filename: pdf_filename || null,
+            whatsapp_message_id: result.messageId || null,
+            status: 'sent',
           });
 
           // Bump conversation timestamp so it surfaces in Inbox
@@ -449,20 +565,28 @@ export async function sendCampaign(req, res) {
       (failures.length > 0 ? ` | ${failures.length} failed` : '')
     );
 
+    const primaryFailureReason = failures[0]?.reason || 'Check your WhatsApp API configuration.';
+    const isAllowedListFailure = failures.some(f => f.reason?.includes('131030') || f.reason?.includes('allowed list'));
+
+    let summaryMessage = '';
+    if (allSent) {
+      summaryMessage = `🚀 Campaign sent to all ${successCount} recipients!`;
+    } else if (noneSent) {
+      summaryMessage = `❌ Campaign failed (0/${leads.length} delivered): ${primaryFailureReason}`;
+    } else if (isAllowedListFailure) {
+      summaryMessage = `⚠️ Partial delivery: ${successCount}/${leads.length} sent. ${failures.length} failed because their numbers are not in your Meta Developer allowed list (Test Account restriction).`;
+    } else {
+      summaryMessage = `⚠️ Partial delivery: ${successCount}/${leads.length} sent, ${failures.length} failed. ${primaryFailureReason}`;
+    }
+
     return res.status(200).json({
       success: !noneSent,
-      message: allSent
-        ? `🚀 Campaign sent to all ${successCount} recipients!`
-        : noneSent
-        ? `❌ Campaign failed — 0/${leads.length} messages delivered. ${failures[0]?.reason || 'Check your WhatsApp API configuration.'}`
-        : `⚠️ Partial delivery: ${successCount}/${leads.length} sent, ${failures.length} failed.`,
+      message: summaryMessage,
       campaign_id: campaignId,
       total_targeted: leads.length,
       total_sent: successCount,
       total_failed: failures.length,
-      ...(failures.length > 0 && {
-        failed_details: failures.slice(0, 5),
-      }),
+      failed_details: failures.slice(0, 5),
     });
   } catch (err) {
     console.error('[Campaign] Unexpected Error:', err?.message, err?.stack);
@@ -472,3 +596,53 @@ export async function sendCampaign(req, res) {
     });
   }
 }
+
+// ═════════════════════════════════════════════════════════════════════
+// POST /api/campaigns/upload-pdf
+// Uploads a campaign PDF document to Supabase Storage and returns public URL
+// ═════════════════════════════════════════════════════════════════════
+export async function uploadCampaignPdf(req, res) {
+  try {
+    const { user, error: authError } = await authenticateRequest(req);
+    if (authError || !user) {
+      return res.status(401).json({ success: false, message: 'Unauthorized — please log in again.' });
+    }
+
+    const { base64, fileName } = req.body;
+    if (!base64) {
+      return res.status(400).json({ success: false, message: 'No file content provided' });
+    }
+
+    const tenantId = user.id;
+    const cleanFileName = (fileName || 'campaign_document.pdf')
+      .replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storagePath = `${tenantId}/${Date.now()}_${cleanFileName}`;
+    const fileBuffer = Buffer.from(base64, 'base64');
+
+    const { data, error } = await supabase.storage
+      .from('campaign-assets')
+      .upload(storagePath, fileBuffer, {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+
+    if (error) {
+      console.error('[Campaign PDF Upload] Storage error:', error);
+      return res.status(500).json({ success: false, message: error.message });
+    }
+
+    const { data: publicUrlData } = supabase.storage
+      .from('campaign-assets')
+      .getPublicUrl(storagePath);
+
+    return res.status(200).json({
+      success: true,
+      url: publicUrlData.publicUrl,
+      fileName: cleanFileName,
+    });
+  } catch (err) {
+    console.error('[Campaign PDF Upload] Exception:', err);
+    return res.status(500).json({ success: false, message: err?.message || 'Server error' });
+  }
+}
+

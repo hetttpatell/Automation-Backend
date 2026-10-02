@@ -111,9 +111,10 @@ export async function sendWhatsAppMessage(tenantId, toPhone, messageText, access
  * @param {string} languageCode - Template language code (e.g. 'en', 'en_US').
  * @param {string|null} bodyText - Optional text variable for positional parameter {{1}}.
  * @param {string|null} accessToken - Optional override access token.
+ * @param {object|null} mediaHeader - Optional media header { type: 'document', link: 'https://...', filename: 'name.pdf' }.
  * @returns {Promise<{success: boolean, messageId: string|null}>}
  */
-export async function sendWhatsAppTemplateMessage(tenantId, toPhone, templateName, languageCode = 'en', bodyText = null, accessToken = null) {
+export async function sendWhatsAppTemplateMessage(tenantId, toPhone, templateName, languageCode = 'en', bodyText = null, accessToken = null, mediaHeader = null) {
   try {
     let resolvedToken = accessToken;
     let resolvedPhoneId = accessToken ? tenantId : null;
@@ -134,13 +135,31 @@ export async function sendWhatsAppTemplateMessage(tenantId, toPhone, templateNam
       language: { code: languageCode }
     };
 
+    const components = [];
+    if (mediaHeader && mediaHeader.link) {
+      components.push({
+        type: 'header',
+        parameters: [
+          {
+            type: mediaHeader.type || 'document',
+            document: {
+              link: mediaHeader.link,
+              filename: mediaHeader.filename || 'Document.pdf'
+            }
+          }
+        ]
+      });
+    }
+
     if (bodyText) {
-      templatePayload.components = [
-        {
-          type: 'body',
-          parameters: [{ type: 'text', text: bodyText }]
-        }
-      ];
+      components.push({
+        type: 'body',
+        parameters: [{ type: 'text', text: bodyText }]
+      });
+    }
+
+    if (components.length > 0) {
+      templatePayload.components = components;
     }
 
     const response = await axios.post(url, {
@@ -166,6 +185,73 @@ export async function sendWhatsAppTemplateMessage(tenantId, toPhone, templateNam
       const details = err.response.data?.error?.error_data?.details || err.response.data?.error?.message;
       if (details) {
         throw new Error(`WhatsApp Template API error: ${details}`);
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Sends a PDF or document message to a customer's phone number via Meta's WhatsApp Cloud API.
+ * @param {string|null} tenantId - The tenant's ID or phone number ID.
+ * @param {string} toPhone - The recipient's phone number.
+ * @param {string} documentUrl - Public HTTPS URL to the document (e.g. Supabase storage link).
+ * @param {string} filename - The filename displayed to the user (e.g. "Brochure.pdf").
+ * @param {string|null} caption - Optional text caption displayed below the document.
+ * @param {string|null} accessToken - Optional override access token.
+ * @returns {Promise<{success: boolean, messageId: string|null}>}
+ */
+export async function sendWhatsAppDocumentMessage(tenantId, toPhone, documentUrl, filename = 'Document.pdf', caption = null, accessToken = null) {
+  try {
+    let resolvedToken = accessToken;
+    let resolvedPhoneId = accessToken ? tenantId : null;
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+    if (!resolvedToken || isUuid) {
+      const creds = await resolveCredentials(tenantId);
+      resolvedToken = resolvedToken || creds.accessToken;
+      resolvedPhoneId = creds.phoneNumberId;
+    }
+    const url = `https://graph.facebook.com/v20.0/${resolvedPhoneId}/messages`;
+    
+    const cleanPhone = String(toPhone).replace(/\D/g, '');
+    console.log(`Sending WhatsApp document (${filename}) to ${cleanPhone} using Phone Number ID: ${resolvedPhoneId}...`);
+
+    const documentObj = {
+      link: documentUrl,
+      filename: filename || 'Document.pdf'
+    };
+
+    if (caption && typeof caption === 'string' && caption.trim()) {
+      let sanitizedCaption = caption;
+      sanitizedCaption = sanitizedCaption.replace(/^\s*\*\s+/gm, '• ');
+      sanitizedCaption = sanitizedCaption.replace(/\*\*/g, '*');
+      documentObj.caption = sanitizedCaption.trim().substring(0, 1024);
+    }
+
+    const response = await axios.post(url, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanPhone,
+      type: 'document',
+      document: documentObj
+    }, {
+      headers: {
+        'Authorization': `Bearer ${resolvedToken}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const messageId = response.data.messages?.[0]?.id || null;
+    console.log(`Document successfully sent to ${cleanPhone}. Message ID: ${messageId || 'unknown'}`);
+    return { success: true, messageId };
+  } catch (err) {
+    console.error(`Axios/Credential error in sendWhatsAppDocumentMessage for ${toPhone}:`, err.message || err);
+    if (err.response) {
+      console.error("Meta API Response Error Data:", JSON.stringify(err.response.data, null, 2));
+      const details = err.response.data?.error?.error_data?.details || err.response.data?.error?.message;
+      if (details) {
+        throw new Error(`WhatsApp API error: ${details}`);
       }
     }
     throw err;
